@@ -15,6 +15,7 @@ import com.course.vsearch.mapper.AsrChunkCheckpointMapper;
 import com.course.vsearch.mapper.VideoMapper;
 import com.course.vsearch.mapper.VideoSegmentMapper;
 import com.course.vsearch.mq.PipelineGateway;
+import com.course.vsearch.security.TenantContext;
 import com.course.vsearch.service.audio.MediaSourceNormalizer;
 import com.course.vsearch.service.lock.DistributedLockService;
 import com.course.vsearch.service.pipeline.InFlightTaskRegistry;
@@ -150,9 +151,11 @@ public class VideoAppService {
     UploadResponse submitSpooled(String videoId, RawUpload first, RawUpload second,
                                  Path uploadDir, String uploadProgressId) {
         String md5 = dedupKey(first.md5(), second == null ? null : second.md5());
+        // 去重与上传锁都按租户拆分：别的租户传同一份文件既不共享记录，也不该争同一把锁
+        String tenantId = TenantContext.require();
         try {
             return lockService.tryExecute(
-                    "vsearch:lock:upload:" + md5,
+                    "vsearch:lock:upload:" + tenantId + ":" + md5,
                     Duration.ofSeconds(1),
                     Duration.ofSeconds(30),
                     () -> routeUpload(videoId, md5, first, second, uploadDir),
@@ -212,6 +215,8 @@ public class VideoAppService {
         video.setFileName(first.name());
         video.setMinioUrl(objectKeyFor(videoId, first.name()));
         video.setMd5(md5);
+        // 租户在请求线程内取（拦截器不会自动填充 INSERT 的租户列，漏写会直接撞非空约束）
+        video.setTenantId(TenantContext.require());
         video.setStatus(VideoStatus.PENDING);
         video.setCreatedAt(LocalDateTime.now());
         video.setUpdatedAt(LocalDateTime.now());
@@ -236,7 +241,10 @@ public class VideoAppService {
         // 先登记再投递：预处理池只有 2 线程，排在后面的任务会长时间「状态待处理 + 处理锁空闲」，
         // 不登记就会被 GET /api/video/{id} 误判成中断（见 InFlightTaskRegistry）
         inFlightRegistry.mark(videoId);
-        uploadFinalizeExecutor.execute(() -> finalizeUpload(new FinalizeJob(videoId, uploadDir, first, second)));
+        // 预处理跑在独立线程池，没有请求上下文：显式声明 system 模式，
+        // 否则拦截器会注入空租户条件（查不到记录 → 上传预处理静默丢弃）
+        uploadFinalizeExecutor.execute(() -> TenantContext.runAsSystem(
+                () -> finalizeUpload(new FinalizeJob(videoId, uploadDir, first, second))));
     }
 
     /**
@@ -579,10 +587,7 @@ public class VideoAppService {
      */
     @Transactional
     public DeleteVideoResponse delete(String videoId) {
-        Video video = videoMapper.selectByVideoId(videoId);
-        if (video == null) {
-            throw new BizException(404, "视频不存在: " + videoId);
-        }
+        Video video = requireOwned(videoId, TenantContext.require());
         // isOrphan 是「处理锁空闲」的判定，取反即「有实例正持有处理锁」
         if (!isOrphan(videoId)) {
             throw new BizException(409, "该视频正在处理中，等处理结束（或后端停止）后再删除");
@@ -618,10 +623,7 @@ public class VideoAppService {
     }
 
     public VideoInfoResponse getInfo(String videoId) {
-        Video video = videoMapper.selectByVideoId(videoId);
-        if (video == null) {
-            throw new BizException(404, "视频不存在: " + videoId);
-        }
+        Video video = requireOwned(videoId, TenantContext.require());
         VideoInfoResponse resp = new VideoInfoResponse();
         resp.setVideoId(video.getVideoId());
         resp.setFileName(video.getFileName());
@@ -636,12 +638,30 @@ public class VideoAppService {
         return resp;
     }
 
-    public String playUrl(String videoId) {
-        Video video = videoMapper.selectByVideoId(videoId);
+    /** 播放地址：票据校验已拿到租户，用「按租户查」避免请求线程无上下文时拦截器注入空条件 */
+    public String playUrl(String videoId, String tenantId) {
+        return resolvePlayUrl(requireOwned(videoId, tenantId));
+    }
+
+    /**
+     * 归属校验：按「租户 + videoId」精确查，不符即 404（不区分「不存在」与「不是你的」，避免探测）。
+     * 显式带租户而非依赖拦截器——持票通道（&lt;video&gt; / EventSource）没有请求上下文，
+     * 拦截器只会注入空租户条件（tenant_id = ''）从而查不到任何记录。
+     */
+    private Video requireOwned(String videoId, String tenantId) {
+        Video video = videoMapper.selectByVideoIdAndTenant(videoId, tenantId);
         if (video == null) {
             throw new BizException(404, "视频不存在: " + videoId);
         }
-        return resolvePlayUrl(video);
+        return video;
+    }
+
+    /** 换票据前的归属校验入口：上传期进度 ID（up_xxx）不代表任何资源，直接放行 */
+    public void verifyResourceAccess(String resourceId, String tenantId) {
+        if (resourceId == null || resourceId.startsWith("up_")) {
+            return;
+        }
+        requireOwned(resourceId, tenantId);
     }
 
     /** 优先返回归一化 MP4（浏览器可直接播放），历史任务缺失时回退原始对象 */

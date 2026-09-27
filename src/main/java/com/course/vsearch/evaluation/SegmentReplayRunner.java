@@ -6,6 +6,7 @@ import com.course.vsearch.entity.VideoSegment;
 import com.course.vsearch.mapper.AsrChunkCheckpointMapper;
 import com.course.vsearch.mapper.VideoMapper;
 import com.course.vsearch.mapper.VideoSegmentMapper;
+import com.course.vsearch.security.TenantContext;
 import com.course.vsearch.service.ai.AsrLine;
 import com.course.vsearch.service.correct.CorrectionResult;
 import com.course.vsearch.service.correct.CorrectionTrace;
@@ -59,6 +60,11 @@ public class SegmentReplayRunner implements ApplicationRunner {
 
     @Override
     public void run(ApplicationArguments args) {
+        // 离线复算按 videoId 直接读库，没有登录上下文：显式声明 system 模式（不加租户条件）
+        TenantContext.runAsSystem(() -> replayIds(args));
+    }
+
+    private void replayIds(ApplicationArguments args) {
         List<String> ids = splitIds(args.getOptionValues("vsearch.eval.replay-video-id"));
         if (ids.isEmpty()) {
             return;

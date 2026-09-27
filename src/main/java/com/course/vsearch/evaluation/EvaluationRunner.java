@@ -1,6 +1,7 @@
 package com.course.vsearch.evaluation;
 
 import com.course.vsearch.config.VSearchProperties;
+import com.course.vsearch.security.TenantContext;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -33,6 +34,12 @@ public class EvaluationRunner implements ApplicationRunner {
 
     @Override
     public void run(ApplicationArguments args) {
+        // 离线评测要按「全库」评估（标注真值本身就是全库视角）：显式声明 system 模式，
+        // 检索与分段查询不加租户条件。线上请求永远带租户，见 SearchService。
+        TenantContext.runAsSystem(this::evaluate);
+    }
+
+    private void evaluate() {
         ObjectMapper mapper = new ObjectMapper()
                 .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 

@@ -19,6 +19,8 @@ public class Video {
     private String fileName;
     private String minioUrl;
     private String md5;
+    /** 数据归属租户。同一账号只能看到自己租户下的视频 */
+    private String tenantId;
     private BigDecimal duration;
     /** 0待处理 1处理中 2完成 3失败 */
     private Integer status;

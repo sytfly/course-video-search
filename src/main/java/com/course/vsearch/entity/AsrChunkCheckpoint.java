@@ -25,5 +25,7 @@ public class AsrChunkCheckpoint {
     private BigDecimal startTime;
     private BigDecimal endTime;
     private String textContent;
+    /** 数据归属租户（与 video 行同值；upsert 语句显式写入） */
+    private String tenantId;
     private LocalDateTime createdAt;
 }

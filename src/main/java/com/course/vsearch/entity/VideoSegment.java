@@ -24,6 +24,9 @@ public class VideoSegment {
     private String textContent;
     private String correctedText;
 
+    /** 数据归属租户。处理流水线在后台写入，没有登录上下文，故必须显式赋值 */
+    private String tenantId;
+
     @TableField(typeHandler = PgVectorTypeHandler.class)
     private float[] embedding;
 

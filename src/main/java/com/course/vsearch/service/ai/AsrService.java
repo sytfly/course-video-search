@@ -65,9 +65,11 @@ public class AsrService {
      * 失败占比超过 {@link #MAX_FAILURE_RATIO} 才整体失败。
      *
      * @param videoId  按块读写断点的归属键
+     * @param tenantId 数据归属租户：本方法跑在后台线程，没有登录上下文，断点落库必须显式带上
      * @param progress 0-100 的块级进度回调，可为 null；并发下由原子计数保证单调递增
      */
-    public List<AsrLine> transcribe(String videoId, AudioPreprocessResult audio, IntConsumer progress) {
+    public List<AsrLine> transcribe(String videoId, String tenantId, AudioPreprocessResult audio,
+                                    IntConsumer progress) {
         List<AudioPreprocessResult.AudioChunk> chunks = audio.chunks();
         int n = chunks.size();
         if (n == 0) {
@@ -80,7 +82,7 @@ public class AsrService {
         List<Future<Void>> futures = new ArrayList<>(n);
         for (int i = 0; i < n; i++) {
             futures.add(asrExecutor.submit(
-                    task(videoId, i, chunks.get(i), checkpoints, run, n, progress)));
+                    task(videoId, tenantId, i, chunks.get(i), checkpoints, run, n, progress)));
         }
 
         for (Future<Void> f : futures) {
@@ -143,6 +145,7 @@ public class AsrService {
 
     /** 单块识别任务。异常一律在任务内兜住，绝不逃出任务边界，否则等待方会丢掉全部已完成结果。 */
     private Callable<Void> task(String videoId,
+                                String tenantId,
                                 int idx,
                                 AudioPreprocessResult.AudioChunk chunk,
                                 Map<Integer, AsrChunkCheckpoint> checkpoints,
@@ -171,7 +174,7 @@ public class AsrService {
                     String text = clean(raw);
                     if (!text.isBlank()) {
                         run.results[idx] = new AsrLine(chunk.start(), chunk.end(), text);
-                        saveCheckpoint(videoId, idx, chunk, text);
+                        saveCheckpoint(videoId, tenantId, idx, chunk, text);
                     }
                 }
             } catch (Throwable t) {
@@ -197,10 +200,10 @@ public class AsrService {
     }
 
     /** 单条立即落库（不包事务）。落库失败只丢该块的续跑能力，不影响本次识别结果。 */
-    private void saveCheckpoint(String videoId, int idx,
+    private void saveCheckpoint(String videoId, String tenantId, int idx,
                                 AudioPreprocessResult.AudioChunk chunk, String text) {
         try {
-            checkpointMapper.upsert(videoId, idx, seconds(chunk.start()), seconds(chunk.end()), text);
+            checkpointMapper.upsert(videoId, idx, seconds(chunk.start()), seconds(chunk.end()), text, tenantId);
         } catch (Exception e) {
             log.warn("[ASR#{}] 断点落库失败，该块无法续跑: {}", idx, e.getMessage());
         }

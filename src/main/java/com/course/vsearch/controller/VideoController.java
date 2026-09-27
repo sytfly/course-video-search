@@ -1,15 +1,19 @@
 package com.course.vsearch.controller;
 
 import com.course.vsearch.common.Result;
+import com.course.vsearch.constant.ProcessStage;
 import com.course.vsearch.dto.ChunkPartResponse;
 import com.course.vsearch.dto.ChunkUploadInitRequest;
 import com.course.vsearch.dto.ChunkUploadInitResponse;
 import com.course.vsearch.dto.DeleteVideoResponse;
+import com.course.vsearch.dto.ProgressEvent;
 import com.course.vsearch.dto.SearchRequest;
 import com.course.vsearch.dto.SearchResult;
 import com.course.vsearch.dto.UploadResponse;
 import com.course.vsearch.dto.VideoInfoResponse;
 import com.course.vsearch.dto.VideoListItem;
+import com.course.vsearch.security.AccessTicketService;
+import com.course.vsearch.security.TenantContext;
 import com.course.vsearch.service.ChunkedUploadService;
 import com.course.vsearch.service.SearchService;
 import com.course.vsearch.service.VideoAppService;
@@ -40,6 +44,7 @@ public class VideoController {
     private final ChunkedUploadService chunkedUploadService;
     private final SearchService searchService;
     private final SseProgressManager sseManager;
+    private final AccessTicketService accessTicketService;
 
     /**
      * 6.1 上传视频：存 MinIO → 发异步任务 → 立即返回任务 ID。
@@ -91,10 +96,44 @@ public class VideoController {
         return Result.ok(searchService.search(request));
     }
 
-    /** 6.3 SSE 实时处理进度 */
+    /**
+     * 6.6 换取访问票据：&lt;video&gt; 标签与 EventSource 都带不了 Authorization 头，
+     * 故先用带鉴权的本接口换一张与「租户 + 资源」绑定的 60 秒票据，再把票据放进 query 使用。
+     * 换票时即完成归属校验，故拿别人的 videoId 换不到票。
+     *
+     * @param resourceId 视频 id（v_xxx）或上传期进度 id（up_xxx，不代表任何资源）
+     */
+    @PostMapping("/ticket")
+    public Result<String> ticket(@RequestParam("resourceId") String resourceId) {
+        String tenantId = TenantContext.require();
+        videoAppService.verifyResourceAccess(resourceId, tenantId);
+        return Result.ok(accessTicketService.issue(tenantId, resourceId));
+    }
+
+    /**
+     * 6.3 SSE 实时处理进度。
+     * 票据无效时返回一个立刻以 failed 事件收尾的流，而不是抛异常——EventSource 对 HTTP 错误状态
+     * 会自动重连，抛异常会形成重连风暴；发 failed 事件则前端按正常失败路径关闭连接。
+     */
     @GetMapping(value = "/progress/{taskId}", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter progress(@PathVariable String taskId) {
+    public SseEmitter progress(@PathVariable String taskId,
+                               @RequestParam(value = "ticket", required = false) String ticket) {
+        if (accessTicketService.verify(ticket, taskId) == null) {
+            return rejected(taskId);
+        }
         return sseManager.connect(taskId);
+    }
+
+    private static SseEmitter rejected(String taskId) {
+        SseEmitter emitter = new SseEmitter(0L);
+        try {
+            emitter.send(SseEmitter.event().name("progress").data(ProgressEvent.of(
+                    taskId, ProcessStage.FAILED, 100, "进度访问票据无效或已过期，请刷新页面重试")));
+        } catch (Exception e) {
+            // 写入失败说明连接已经断开，无需处理
+        }
+        emitter.complete();
+        return emitter;
     }
 
     /** 6.4 视频库列表：按上传时间倒序，含文件名 / 时长 / 状态 / 片段数 / 章节骨架。
@@ -121,11 +160,18 @@ public class VideoController {
         return Result.ok(videoAppService.getInfo(videoId));
     }
 
-    /** 播放（302 到 MinIO 预签名地址，前端 video 标签可直接跳转 #t=秒） */
+    /** 播放（302 到 MinIO 预签名地址，前端 video 标签可直接跳转 #t=秒）。
+     * 不带 Authorization 头，故用 query 里的票据鉴权；票据的租户直接决定查哪个租户的视频。 */
     @GetMapping("/play/{videoId}")
-    public org.springframework.http.ResponseEntity<Void> play(@PathVariable String videoId) {
+    public org.springframework.http.ResponseEntity<Void> play(
+            @PathVariable String videoId,
+            @RequestParam(value = "ticket", required = false) String ticket) {
+        String tenantId = accessTicketService.verify(ticket, videoId);
+        if (tenantId == null) {
+            return org.springframework.http.ResponseEntity.status(org.springframework.http.HttpStatus.FORBIDDEN).build();
+        }
         return org.springframework.http.ResponseEntity.status(org.springframework.http.HttpStatus.FOUND)
-                .location(URI.create(videoAppService.playUrl(videoId)))
+                .location(URI.create(videoAppService.playUrl(videoId, tenantId)))
                 .build();
     }
 }

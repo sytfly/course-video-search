@@ -4,7 +4,7 @@
 
 上传一节课程视频 → 自动转写、纠错、按话题分段、向量化入库 → 搜索「三元运算符的格式」→ 返回命中片段与时间戳，点击即在播放器跳转。
 
-面向**个人自托管**场景：单机单用户、无鉴权、无多租户。想改成多人服务请自行 fork。
+面向**个人自托管 / 小团队自建**场景：注册一个账号就是一个独立空间，只看得到、搜得到、播得到、删得掉自己上传的视频，账号之间数据互不可见。不做角色权限、配额与共享资源池。
 
 ## 功能亮点
 
@@ -14,6 +14,7 @@
 - **中文术语纠错不靠堆词表**：用拼音匹配把任意同音错写收敛到有限术语表，而不是人工枚举错法（见[设计决策 1](#1-中文纠错不枚举错写改为拼音匹配)）
 - **拉丁标识符也按「耳音」纠**：讲师按英文念 Redis/Ctrl/false，ASR 拼成 reice/conttrol/foalse——用预算制对齐 DP 收敛回 Java 标准面（见[设计决策 2](#2-拉丁标识符纠错拼音方案的同构姊妹篇)）
 - **数字可复现**：分段 WindowDiff 与检索 Recall@K 都能用离线命令复算，参数注释里写了实验依据，不是「感觉还行」
+- **账号之间数据不串**：注册即开独立空间，视频 / 片段 / ASR 断点都带 `tenant_id`，检索 / 列表 / 详情 / 播放 / 删除在数据库层按租户过滤，漏写条件只会查不到（而不是把别人的数据放出去）；连 MD5 去重键都按租户拆分（见[设计决策 7](#7-账号隔离一个用户一个租户)）
 
 ## 处理流水线
 
@@ -68,13 +69,17 @@ mvn spring-boot:run
 cd frontend && npm install && npm run dev
 ```
 
-打开前端，上传视频即可。
+打开前端 → 注册一个账号（自动开一个独立空间）→ 上传视频即可。
 
 默认走本地线程池（`vsearch.pipeline.type=local`），**不需要 RocketMQ 也能跑通全链路**。
 想改走 MQ：`docker compose up -d rmqnamesrv rmqbroker`，然后
 `mvn spring-boot:run "-Dspring-boot.run.arguments=--vsearch.pipeline.type=rocketmq"`。
 broker 的 `brokerIP1` 固定在 `docker/rocketmq/broker.conf` 里（默认注册容器内网 IP，
 宿主机上的应用拿不到，发送会 `sendDefaultImpl call timeout`）。
+
+> **升级已有数据库**：`video` / `video_segment` / `video_asr_chunk` 会在启动时自动加 `tenant_id` 列，
+> 存量行回填到默认租户 `t_default`；旧的全局唯一索引 `uk_video_md5` 会被替换为 `uk_video_tenant_md5`。
+> 想看到升级前的视频，需配置 `VSEARCH_DEFAULT_ADMIN_PASSWORD` 后用 `admin` 登录（见[设计决策 7](#7-账号隔离一个用户一个租户)）。
 
 ### ffmpeg 配置
 
@@ -97,6 +102,8 @@ setx FFPROBE_PATH "C:/tools/ffmpeg/bin/ffprobe.exe"
 | `FFMPEG_PATH` / `FFPROBE_PATH` | `ffmpeg` / `ffprobe` | 从 PATH 找 |
 | `PG_HOST` / `PG_PORT` / `PG_DB` / `PG_USER` / `PG_PASSWORD` | `localhost` / `5432` / `vsearch` / `vsearch` / `vsearch123` | 与 compose 一致，**默认口令仅供本地开发** |
 | `REDIS_HOST` / `REDIS_PORT` | `localhost` / `6379` | |
+| `VSEARCH_JWT_SECRET` | 随机生成 | 登录令牌签名密钥。未配置则每次启动随机生成并 WARN——重启即需重新登录，生产环境建议固定 |
+| `VSEARCH_DEFAULT_ADMIN_PASSWORD` | 空 | 配了才会创建默认管理员 `admin`（归属 `t_default`，即升级前的存量视频）。不配则不建弱口令，只会 WARN 提示存量视频新注册账号看不到 |
 
 ## 上传说明
 
@@ -108,22 +115,28 @@ setx FFPROBE_PATH "C:/tools/ffmpeg/bin/ffprobe.exe"
 
 ## 接口一览
 
-所有接口挂在 `/api/video` 下，统一返回 `Result<T>`（`progress` 为 SSE 流除外）。
+所有接口挂在 `/api/video` 与 `/api/auth` 下，统一返回 `Result<T>`（`progress` 为 SSE 流除外）。
+
+除 `/api/auth/register`、`/api/auth/login`、`/api/video/play/**`、`/api/video/progress/**` 外，所有 `/api/**` 都要带 `Authorization: Bearer <token>`。播放与进度流带不了请求头，走 `POST /api/video/ticket` 换一张与「租户 + 资源」绑定的短期票据放在 query 里。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
+| `POST` | `/api/auth/register` | 注册（开放注册），自动开一个独立空间并返回令牌 |
+| `POST` | `/api/auth/login` | 登录，返回令牌（7 天有效） |
+| `GET` | `/api/auth/me` | 当前账号，前端用它校验本地令牌是否仍有效 |
+| `POST` | `/api/video/ticket` | 用令牌换访问票据（`resourceId` = videoId 或上传期进度 id），换票时即校验归属 |
 | `POST` | `/api/video/upload` | 整文件上传（multipart），立即返回 `taskId` |
 | `POST` | `/api/video/upload/init` | 分片上传：建会话或复用会话，返回 `uploadId` 与已收分片 |
 | `POST` | `/api/video/upload/part` | 分片上传：按序号上传单片，幂等可重传 |
 | `POST` | `/api/video/upload/complete` | 分片上传：校验完整性后合并入库 |
-| `POST` | `/api/video/search` | 语义检索，返回命中片段与时间戳 |
-| `GET` | `/api/video/progress/{taskId}` | SSE 进度流（`text/event-stream`） |
+| `POST` | `/api/video/search` | 语义检索，返回命中片段与时间戳（只检索本租户） |
+| `GET` | `/api/video/progress/{taskId}?ticket=` | SSE 进度流（`text/event-stream`） |
 | `GET` | `/api/video/list` | 视频库列表（含状态、时长、片段数、章节骨架） |
-| `GET` | `/api/video/{videoId}` | 单个视频详情 |
-| `GET` | `/api/video/play/{videoId}` | 302 重定向到可播放对象（MinIO 预签名） |
+| `GET` | `/api/video/{videoId}` | 单个视频详情（含预签名播放地址） |
+| `GET` | `/api/video/play/{videoId}?ticket=` | 302 重定向到可播放对象（MinIO 预签名） |
 | `DELETE` | `/api/video/{videoId}` | 删除视频及其片段、ASR 块与进度快照 |
 
-实现见 [VideoController](src/main/java/com/course/vsearch/controller/VideoController.java)。
+实现见 [AuthController](src/main/java/com/course/vsearch/controller/AuthController.java) 与 [VideoController](src/main/java/com/course/vsearch/controller/VideoController.java)。
 
 ## 评测数据
 
@@ -175,7 +188,7 @@ setx FFPROBE_PATH "C:/tools/ffmpeg/bin/ffprobe.exe"
 
 故意写在这里——这些都是真实存在的，不是待办清单：
 
-- **单机单用户**：无鉴权、无多租户、无配额
+- **没有角色权限**：账号只有「自己的数据」这一种可见域，没有 RBAC、管理员后台、配额与共享资源池；升级前的存量视频统一归属 `t_default`，新注册账号看不到它们
 - **检索只走音频**：无音轨的视频无法检索；帧 OCR / CLIP 跨模态未实现
 - **全库 Recall@1 75%（CI [53.13%, 88.81%]，n=20）**：片内主流程 @1 85%、@5 排名与交付均 100%；全库交付 @5 95%。低置信放宽到 3 条的代价是：无关查询也会看到 3 条弱结果（均带低置信标记）
 - **分段策略不通用**：IDE 演示型课程 WD≤0.20、零漏切；叙事/PPT 型（继承概述 WD 0.40）仍会被 depth 兜底补伪切
@@ -268,6 +281,18 @@ ASR 的同音错写变体是无限的——同一节课就有「3元运算符 / 
 
 诚实结论与 §5 一致：**分片上传不等于更快**。串行分片受上行带宽限制甚至略慢；并行对总时长帮助有限，它的真实价值是「单请求失败的代价从整个文件降到几 MB」+「按服务端已确认分片数给出精确进度」+ 断点续传。
 
+### 7. 账号隔离：一个用户一个租户
+
+用词先说清：这里的「多租户」不是 SaaS 那套租户管理，而是**每个账号只能看到、搜到、播到、删掉自己上传的视频**。一个用户 = 一个租户，`tenant_id` 就是数据归属边界。
+
+- **共享表 + 拦截器自动过滤**：`video` / `video_segment` / `video_asr_chunk` 三张表各加一列 `tenant_id`，MyBatis-Plus 的 `TenantLineInnerInterceptor` 给每条 SQL 自动补条件，故「按 videoId 查片段」「全库列表」这些既有语句一行都不用改，将来新加的查询也不会因为忘写条件而漏数据
+- **失败关闭，而不是失败放开**：拿不到租户上下文时 `getTenantId()` 返回空串，条件恒不成立——表现是「查不到数据」并立刻暴露，而不是「不带条件」把别人的数据放出去
+- **MD5 去重键必须按租户拆**：原先 `uk_video_md5` 是全局唯一，B 上传 A 传过的同一份文件会直接命中 A 的记录、拿到 A 的 videoId，这就是最实在的一处串台。改成 `(tenant_id, md5)` 唯一后，去重只在账号内生效
+- **三处「自动不了」的地方显式收口**：① 后台线程（上传预处理池 / 处理流水线 / MQ 消费者 / 启动自愈）没有请求上下文，入口处显式 `TenantContext.runAsSystem`，租户值由它们自己写库；② SSE 进度流与 `<video>` 播放带不了请求头，用 `POST /api/video/ticket` 换一张与「租户 + 资源」绑定的短期票据放在 query，换票时即完成归属校验；③ 归属校验一律显式带租户查询（`selectByVideoIdAndTenant`）而不是依赖拦截器——持票通道没有上下文，拦截器只会注入空条件
+- **升级存量数据不改索引语义**：`ADD COLUMN IF NOT EXISTS` → `UPDATE ... WHERE IS NULL` → `SET NOT NULL` 三段式，刻意不给 DEFAULT——开发期漏写 `tenant_id` 应该直接撞非空约束报错，而不是静默落进默认租户
+
+**已知取舍**：票据有效期 2 小时（与播放用的预签名 URL 对齐，`<video>` 播放期间会持续发 Range 请求，票据中途过期会让播放卡死），故票据泄漏的暴露面与预签名 URL 同一量级，靠「资源绑定 + 换票时校验归属」收敛。令牌密钥未配 `VSEARCH_JWT_SECRET` 时随机生成，重启即需重新登录。
+
 ## 目录结构
 
 ```
@@ -281,6 +306,7 @@ src/main/java/com/course/vsearch/
 ├─ service/lock/       分布式锁（看门狗续约、存活探针）
 ├─ service/progress/   进度快照与 SSE 推送
 ├─ service/storage/    MinIO 读写
+├─ security/           登录令牌、租户上下文与访问票据（JwtService / TenantContext / AccessTicketService）
 ├─ evaluation/         离线复算与评测
 └─ controller/         HTTP 接口
 src/main/resources/dictionary/tech-terms.json   术语表

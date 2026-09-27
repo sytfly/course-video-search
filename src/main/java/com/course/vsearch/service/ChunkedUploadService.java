@@ -8,6 +8,7 @@ import com.course.vsearch.dto.ChunkUploadInitRequest;
 import com.course.vsearch.dto.ChunkUploadInitResponse;
 import com.course.vsearch.dto.ProgressEvent;
 import com.course.vsearch.dto.UploadResponse;
+import com.course.vsearch.security.TenantContext;
 import com.course.vsearch.service.progress.ProgressService;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RBitSet;
@@ -103,7 +104,7 @@ public class ChunkedUploadService {
             }
         }
 
-        RBucket<String> session = redisson.getBucket(SESSION_PREFIX + sessionKey);
+        RBucket<String> session = redisson.getBucket(sessionPointerKey(TenantContext.require(), sessionKey));
         String existing = session.get();
         if (existing != null) {
             RMap<String, String> old = meta(existing);
@@ -121,6 +122,7 @@ public class ChunkedUploadService {
 
         String uploadId = "cu_" + UUID.randomUUID().toString().replace("-", "");
         RMap<String, String> meta = meta(uploadId);
+        meta.put("tenantId", TenantContext.require());
         meta.put("sessionKey", sessionKey);
         meta.put("chunkSize", String.valueOf(chunkSize));
         meta.put("fileCount", String.valueOf(files.size()));
@@ -325,10 +327,11 @@ public class ChunkedUploadService {
         return head.toString() + (parts.size() > MISSING_PREVIEW ? " …共 " + parts.size() + " 片" : "");
     }
 
-    /** 会话状态缺失（未 init、已 complete、或被 Redis TTL 回收）一律按同一个语义报错 */
+    /** 会话状态缺失（未 init、已 complete、或被 Redis TTL 回收）一律按同一个语义报错。
+     * uploadId 由客户端提供，故必须校验会话归属：拿别人的 uploadId 也一律「不存在」。 */
     private RMap<String, String> requireMeta(String uploadId) {
         RMap<String, String> meta = meta(uploadId);
-        if (uploadId == null || !meta.isExists()) {
+        if (uploadId == null || !meta.isExists() || !TenantContext.require().equals(meta.get("tenantId"))) {
             throw new BizException(404, "分片上传会话不存在或已过期（保留 " + sessionTtl()
                     + " 小时），请重新选择文件上传");
         }
@@ -338,6 +341,7 @@ public class ChunkedUploadService {
     /** 作废一个会话：Redis 会话指针 / 元数据 / 分片位图 + 已落盘的会话目录 */
     private void discard(String uploadId) {
         RMap<String, String> meta = meta(uploadId);
+        String tenantId = meta.get("tenantId");
         String sessionKey = meta.get("sessionKey");
         String fileCount = meta.get("fileCount");
         if (fileCount != null) {
@@ -346,13 +350,21 @@ public class ChunkedUploadService {
             }
         }
         meta.delete();
-        if (sessionKey != null) {
-            RBucket<String> session = redisson.getBucket(SESSION_PREFIX + sessionKey);
+        if (tenantId != null && sessionKey != null) {
+            RBucket<String> session = redisson.getBucket(sessionPointerKey(tenantId, sessionKey));
             if (uploadId.equals(session.get())) {
                 session.delete();
             }
         }
         VideoAppService.deleteRecursively(sessionDir(uploadId));
+    }
+
+    /**
+     * 会话指针 key：以租户为前缀。sessionKey 由客户端按「文件名 + 大小 + 修改时间」算出，
+     * 不同租户传同一个文件会得到同一个 sessionKey，不加租户前缀就会互相复用对方的会话。
+     */
+    private static String sessionPointerKey(String tenantId, String sessionKey) {
+        return SESSION_PREFIX + tenantId + ":" + sessionKey;
     }
 
     private long resolveChunkSize(Long requested) {

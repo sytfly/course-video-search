@@ -1,4 +1,58 @@
 const BASE = '/api/video'
+const AUTH_BASE = '/api/auth'
+
+/** 令牌存 localStorage：刷新页面后仍保持登录；登出 / 401 时清掉 */
+const TOKEN_KEY = 'vsearch.token'
+
+export function getToken() {
+  return localStorage.getItem(TOKEN_KEY) || ''
+}
+
+export function setToken(token) {
+  if (token) {
+    localStorage.setItem(TOKEN_KEY, token)
+  } else {
+    localStorage.removeItem(TOKEN_KEY)
+  }
+}
+
+/** 登录失效：清令牌并广播，App 收到后切回登录页（避免每个调用点各自处理跳转） */
+function expireSession() {
+  setToken('')
+  window.dispatchEvent(new CustomEvent('vsearch:unauthorized'))
+}
+
+/** 所有请求都带 Bearer 令牌；multipart 请求不设 Content-Type，交给浏览器补 boundary */
+function withAuth(headers) {
+  const token = getToken()
+  return token ? {...headers, Authorization: `Bearer ${token}`} : headers
+}
+
+/**
+ * 统一解析后端的 {code,message,data} 包装。
+ * 两种 401 都要按登录失效处理：Spring Security 拦下时是 HTTP 401，业务层抛的是 code=401。
+ */
+async function unwrap(resp) {
+  if (resp.status === 401) {
+    expireSession()
+    throw new Error('登录状态已失效，请重新登录')
+  }
+  const body = await resp.json().catch(() => null)
+  if (!body) {
+    throw new Error(`请求失败(${resp.status})`)
+  }
+  if (body.code === 401) {
+    expireSession()
+  }
+  if (body.code !== 0) {
+    throw new Error(body.message || `请求失败(${resp.status})`)
+  }
+  return body.data
+}
+
+function request(url, options = {}) {
+  return fetch(url, {...options, headers: withAuth(options.headers)}).then(unwrap)
+}
 
 /** 分片大小请求值：实际以后端 init 响应返回的 chunkSize 为准（越界时后端会改成它的默认值） */
 const CHUNK_SIZE = 5 * 1024 * 1024
@@ -47,17 +101,12 @@ async function post(path, {json, form} = {}, timeoutMs = CONTROL_TIMEOUT_MS) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    const resp = await fetch(`${BASE}${path}`, {
+    return await request(`${BASE}${path}`, {
       method: 'POST',
       signal: controller.signal,
       headers: json ? {'Content-Type': 'application/json'} : undefined,
       body: json ? JSON.stringify(json) : form
     })
-    const body = await resp.json()
-    if (!body || body.code !== 0) {
-      throw new Error((body && body.message) || `请求失败(${resp.status})`)
-    }
-    return body.data
   } finally {
     clearTimeout(timer)
   }
@@ -189,17 +238,20 @@ export async function uploadVideo(files, onProgress, uploadTaskId) {
 /**
  * 订阅处理进度。
  * opts.probe=false 关闭静默看门狗（上传期进度流用：那个 ID 不是真实任务，反查只会 404）。
+ *
+ * EventSource 带不了 Authorization 头，故先用带鉴权的换票接口拿一张与「租户 + 资源」绑定的票据，
+ * 拿到票据后才真正建连。返回的对象只暴露 close()（调用方只用到它）。
  */
 export function openProgressStream(taskId, handlers, opts = {}) {
   const probing = opts.probe !== false
   let timer = null
   let finished = false
-  const es = new EventSource(`${BASE}/progress/${taskId}`)
+  let es = null
 
   const stop = () => {
     finished = true
     clearTimeout(timer)
-    es.close()
+    es?.close()
   }
 
   // 每收到一次事件就重新计时；静默超时后不再干等，直接反查后端
@@ -236,64 +288,93 @@ export function openProgressStream(taskId, handlers, opts = {}) {
     }
   }
 
-  es.addEventListener('progress', (e) => {
-    const evt = JSON.parse(e.data)
-    handlers.onEvent?.(evt)
-    if (evt.stage === 'done') {
+  fetchTicket(taskId)
+    .then((ticket) => {
+      if (finished) return
+      es = new EventSource(`${BASE}/progress/${taskId}?ticket=${encodeURIComponent(ticket)}`)
+      es.addEventListener('progress', (e) => {
+        const evt = JSON.parse(e.data)
+        handlers.onEvent?.(evt)
+        if (evt.stage === 'done') {
+          stop()
+          handlers.onDone?.(evt)
+          return
+        }
+        if (evt.stage === 'failed') {
+          stop()
+          handlers.onFailed?.(evt)
+          return
+        }
+        arm()
+      })
+      es.onerror = () => {
+        // 后端完成时会主动关闭连接，这里不弹错误；真正的中断交给静默看门狗判定
+      }
+      arm()
+    })
+    .catch((e) => {
+      if (finished) return
       stop()
-      handlers.onDone?.(evt)
-      return
-    }
-    if (evt.stage === 'failed') {
-      stop()
-      handlers.onFailed?.(evt)
-      return
-    }
-    arm()
-  })
-  es.onerror = () => {
-    // 后端完成时会主动关闭连接，这里不弹错误；真正的中断交给静默看门狗判定
-  }
-  arm()
-  return es
+      handlers.onFailed?.({stage: 'failed', progress: 100, message: e.message})
+    })
+
+  return {close: stop}
 }
 
-export async function getVideoInfo(videoId) {
-  const resp = await fetch(`${BASE}/${videoId}`)
-  const body = await resp.json()
-  if (body.code !== 0) throw new Error(body.message)
-  return body.data
+/** 换访问票据：票据与「当前租户 + 该资源」绑定，故拿别人的 id 换不到 */
+export function fetchTicket(resourceId) {
+  const qs = new URLSearchParams({resourceId})
+  return request(`${BASE}/ticket?${qs}`, {method: 'POST'})
+}
+
+export function getVideoInfo(videoId) {
+  return request(`${BASE}/${videoId}`)
 }
 
 /** 视频库列表：按上传时间倒序，含文件名/时长/状态/片段数/章节骨架 */
-export async function listVideos() {
-  const resp = await fetch(`${BASE}/list`)
-  const body = await resp.json()
-  if (body.code !== 0) throw new Error(body.message)
-  return body.data
+export function listVideos() {
+  return request(`${BASE}/list`)
 }
 
 /** 删除视频：后端会同对象存储文件、片段、ASR 断点、本地工作目录一起清掉，不可恢复 */
-export async function deleteVideo(videoId) {
-  const resp = await fetch(`${BASE}/${videoId}`, {method: 'DELETE'})
-  const body = await resp.json()
-  if (body.code !== 0) throw new Error(body.message)
-  return body.data
+export function deleteVideo(videoId) {
+  return request(`${BASE}/${videoId}`, {method: 'DELETE'})
 }
 
-export async function search(query, topK = 5, videoId = '') {
-  const resp = await fetch(`${BASE}/search`, {
+export function search(query, topK = 5, videoId = '') {
+  return request(`${BASE}/search`, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({query, topK, videoId: videoId || undefined})
   })
-  const body = await resp.json()
-  if (body.code !== 0) throw new Error(body.message)
-  return body.data
 }
 
-export function playUrl(videoId) {
-  return `${BASE}/play/${videoId}`
+// ------------------------------------------------------------------ 账号
+
+/** 注册：后端自动开一个租户并把存量数据隔离在各自租户下，注册成功即返回令牌 */
+export function register(username, password) {
+  return request(`${AUTH_BASE}/register`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({username, password})
+  })
+}
+
+export function login(username, password) {
+  return request(`${AUTH_BASE}/login`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({username, password})
+  })
+}
+
+/** 校验本地令牌是否仍有效（App 启动时调用；失效会被拦成 401 并触发回登录页） */
+export function fetchMe() {
+  return request(`${AUTH_BASE}/me`)
+}
+
+export function logout() {
+  setToken('')
 }
 
 export function formatTime(sec) {

@@ -16,6 +16,7 @@ import com.course.vsearch.service.chapter.ChapterTitleService;
 import com.course.vsearch.service.correct.CorrectionResult;
 import com.course.vsearch.service.correct.TerminologyService;
 import com.course.vsearch.service.progress.ProgressService;
+import com.course.vsearch.security.TenantContext;
 import com.course.vsearch.service.segment.SegmentContext;
 import com.course.vsearch.service.segment.SegmentationService;
 import com.course.vsearch.service.segment.TopicSegment;
@@ -67,7 +68,16 @@ public class VideoProcessService {
     private final InFlightTaskRegistry inFlightRegistry;
     private final RedissonClient redisson;
 
+    /**
+     * 后台处理入口：本地线程池与 RocketMQ 消费者都没有登录上下文，
+     * 故显式声明「本次按 videoId 直接操作、不加租户条件」，租户值随后从 video 行取出，
+     * 由写库语句显式带上（video_asr_chunk.upsert 与 video_segment 落库）。
+     */
     public void process(String videoId) {
+        TenantContext.runAsSystem(() -> doProcess(videoId));
+    }
+
+    private void doProcess(String videoId) {
         RLock lock = redisson.getLock(processLockKey(videoId));
         boolean locked;
         try {
@@ -123,7 +133,7 @@ public class VideoProcessService {
                 }
 
                 // 1. 分块 ASR（15% -> 65%）
-                List<AsrLine> rawLines = asrService.transcribe(videoId, audio,
+                List<AsrLine> rawLines = asrService.transcribe(videoId, video.getTenantId(), audio,
                         p -> publish(videoId, ProcessStage.ASR, 15 + (int) (p * 0.50),
                                 "语音识别中 " + p + "%"));
                 if (rawLines.isEmpty()) {
@@ -166,6 +176,7 @@ public class VideoProcessService {
 
                     VideoSegment entity = new VideoSegment();
                     entity.setVideoId(videoId);
+                    entity.setTenantId(video.getTenantId());
                     entity.setSegmentIndex(i);
                     entity.setStartTime(seconds(seg.getStart()));
                     entity.setEndTime(seconds(seg.getEnd()));

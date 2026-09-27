@@ -9,6 +9,7 @@ import com.course.vsearch.entity.VideoSegment;
 import com.course.vsearch.handler.PgVectorTypeHandler;
 import com.course.vsearch.mapper.VideoMapper;
 import com.course.vsearch.mapper.VideoSegmentMapper;
+import com.course.vsearch.security.TenantContext;
 import com.course.vsearch.service.ai.EmbeddingService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -90,8 +91,12 @@ public class SearchService {
         String vectorLiteral = PgVectorTypeHandler.toPgLiteral(queryVector);
         int pool = Math.max(props.getSearch().getCandidatePool(), request.getTopK());
 
+        // 线上检索必带租户，检索结果永远限定在本账号自己的数据里；
+        // 只有离线评测（启动参数触发、跑在 system 模式下）才传 null，按全库评估。
+        String tenantId = TenantContext.isSystem() ? null : TenantContext.require();
+
         List<VideoSegment> vectorHits = segmentMapper.vectorTopN(
-                vectorLiteral, request.getVideoId(), pool);
+                vectorLiteral, request.getVideoId(), tenantId, pool);
 
         List<VideoSegment> candidates;
         List<String> grams = List.of();
@@ -99,7 +104,7 @@ public class SearchService {
             grams = extractGrams(request.getQuery());
             List<VideoSegment> keywordHits = grams.isEmpty()
                     ? List.of()
-                    : segmentMapper.keywordTopN(grams, vectorLiteral, request.getVideoId(), pool);
+                    : segmentMapper.keywordTopN(grams, vectorLiteral, request.getVideoId(), tenantId, pool);
             candidates = merge(vectorHits, keywordHits);
             log.debug("混合检索：向量 {}，关键词 {}，候选 {}",
                     vectorHits.size(), keywordHits.size(), candidates.size());

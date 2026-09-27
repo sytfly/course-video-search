@@ -25,6 +25,9 @@
                1 - (s.embedding &lt;=&gt; CAST(#{embedding} AS vector)) AS score
         FROM video_segment s
         <where>
+            <if test="tenantId != null and tenantId != ''">
+                AND s.tenant_id = #{tenantId}
+            </if>
             <if test="videoId != null and videoId != ''">
                 AND s.video_id = #{videoId}
             </if>
@@ -37,6 +40,7 @@
       关键词召回：命中任一 bigram 即入选。
       score 仍是语义余弦相似度（与向量分支同口径，便于统一排序与闸门），
       另有 matched_grams 供关键词加成使用；候选顺序按余弦降序。
+      tenantId 由调用方显式传入（线上检索必带）：留空只在离线评测的 system 模式下出现，表示全库。
     -->
     <select id="keywordTopN" resultMap="segmentMap">
         SELECT s.*,
@@ -49,17 +53,22 @@
                 WHERE s.text_content ILIKE '%' || g || '%') AS matched_grams,
                1 - (s.embedding &lt;=&gt; CAST(#{embedding} AS vector)) AS score
         FROM video_segment s
-        WHERE EXISTS (
-            SELECT 1 FROM unnest(
-                <foreach collection="grams" item="g" open="ARRAY[" close="]::text[]" separator=",">
-                    #{g}
-                </foreach>
-            ) AS g
-            WHERE s.text_content ILIKE '%' || g || '%'
-        )
-        <if test="videoId != null and videoId != ''">
-            AND s.video_id = #{videoId}
-        </if>
+        <where>
+            <if test="tenantId != null and tenantId != ''">
+                AND s.tenant_id = #{tenantId}
+            </if>
+            AND EXISTS (
+                SELECT 1 FROM unnest(
+                    <foreach collection="grams" item="g" open="ARRAY[" close="]::text[]" separator=",">
+                        #{g}
+                    </foreach>
+                ) AS g
+                WHERE s.text_content ILIKE '%' || g || '%'
+            )
+            <if test="videoId != null and videoId != ''">
+                AND s.video_id = #{videoId}
+            </if>
+        </where>
         ORDER BY score DESC
         LIMIT #{limit}
     </select>

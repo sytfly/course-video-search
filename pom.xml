@@ -20,6 +20,7 @@
     <properties>
         <java.version>17</java.version>
         <mybatis-plus.version>3.5.9</mybatis-plus.version>
+        <jjwt.version>0.12.6</jjwt.version>
         <minio.version>8.5.14</minio.version>
         <redisson.version>3.36.0</redisson.version>
         <rocketmq-client.version>5.3.1</rocketmq-client.version>
@@ -41,6 +42,35 @@
             <groupId>com.baomidou</groupId>
             <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
             <version>${mybatis-plus.version}</version>
+        </dependency>
+        <!-- 3.5.9 起 JSqlParser 相关能力（含 TenantLineInnerInterceptor）拆到独立坐标，必须显式引入 -->
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-jsqlparser</artifactId>
+            <version>${mybatis-plus.version}</version>
+        </dependency>
+
+        <!-- 鉴权：Spring Security（过滤链 + BCrypt） + JWT（无状态令牌，服务端不存会话） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-api</artifactId>
+            <version>${jjwt.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-impl</artifactId>
+            <version>${jjwt.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-jackson</artifactId>
+            <version>${jjwt.version}</version>
+            <scope>runtime</scope>
         </dependency>
 
         <!-- PostgreSQL + pgvector 驱动 -->

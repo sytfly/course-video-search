@@ -2,6 +2,7 @@ package com.course.vsearch.service.pipeline;
 
 import com.course.vsearch.entity.Video;
 import com.course.vsearch.mapper.VideoMapper;
+import com.course.vsearch.security.TenantContext;
 import com.course.vsearch.service.VideoAppService;
 import com.course.vsearch.service.lock.DistributedLockService;
 import lombok.RequiredArgsConstructor;
@@ -47,6 +48,11 @@ public class StartupRecoveryRunner implements ApplicationRunner {
 
     @Override
     public void run(ApplicationArguments args) {
+        // 启动阶段没有任何登录上下文：显式声明按 videoId 直接操作（租户条件不参与）
+        TenantContext.runAsSystem(this::scan);
+    }
+
+    private void scan() {
         List<Video> unfinished;
         try {
             unfinished = videoMapper.selectUnfinished();
@@ -94,7 +100,7 @@ public class StartupRecoveryRunner implements ApplicationRunner {
             t.setDaemon(true);
             return t;
         });
-        scheduler.schedule(() -> {
+        scheduler.schedule(() -> TenantContext.runAsSystem(() -> {
             int recovered = 0;
             for (String videoId : videoIds) {
                 try {
@@ -118,6 +124,6 @@ public class StartupRecoveryRunner implements ApplicationRunner {
                 log.info("启动自愈延迟复查完成：补投 {} 个死任务", recovered);
             }
             scheduler.shutdown();
-        }, RECHECK_DELAY_SECONDS, TimeUnit.SECONDS);
+        }), RECHECK_DELAY_SECONDS, TimeUnit.SECONDS);
     }
 }
