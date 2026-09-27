@@ -1,0 +1,24 @@
+target/
+!.mvn/wrapper/maven-wrapper.jar
+.idea/
+*.iml
+.vscode/
+.settings/
+.project
+.classpath
+
+# 本地处理中间产物（提取的音频、分块）
+/data/
+/logs/
+*.log
+
+# 前端
+node_modules/
+frontend/dist/
+
+# 本地密钥配置
+application-local.yml
+.env
+
+# IDE / 智能体内部工作区：内部实施计划、标注底稿（含第三方课程逐字稿），一律不发布
+.trae/

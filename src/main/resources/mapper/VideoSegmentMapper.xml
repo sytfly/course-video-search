@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.course.vsearch.mapper.VideoSegmentMapper">
+
+    <resultMap id="segmentMap" type="com.course.vsearch.entity.VideoSegment">
+        <id property="id" column="id"/>
+        <result property="videoId" column="video_id"/>
+        <result property="segmentIndex" column="segment_index"/>
+        <result property="startTime" column="start_time"/>
+        <result property="endTime" column="end_time"/>
+        <result property="textContent" column="text_content"/>
+        <result property="correctedText" column="corrected_text"/>
+        <result property="embedding" column="embedding"
+                typeHandler="com.course.vsearch.handler.PgVectorTypeHandler"/>
+        <result property="chapterTitle" column="chapter_title"/>
+        <result property="strategy" column="strategy"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="score" column="score"/>
+        <result property="matchedGrams" column="matched_grams"/>
+    </resultMap>
+
+    <select id="vectorTopN" resultMap="segmentMap">
+        SELECT s.*,
+               1 - (s.embedding &lt;=&gt; CAST(#{embedding} AS vector)) AS score
+        FROM video_segment s
+        <where>
+            <if test="videoId != null and videoId != ''">
+                AND s.video_id = #{videoId}
+            </if>
+        </where>
+        ORDER BY s.embedding &lt;=&gt; CAST(#{embedding} AS vector)
+        LIMIT #{limit}
+    </select>
+
+    <!--
+      关键词召回：命中任一 bigram 即入选。
+      score 仍是语义余弦相似度（与向量分支同口径，便于统一排序与闸门），
+      另有 matched_grams 供关键词加成使用；候选顺序按余弦降序。
+    -->
+    <select id="keywordTopN" resultMap="segmentMap">
+        SELECT s.*,
+               (SELECT count(*)
+                FROM unnest(
+                    <foreach collection="grams" item="g" open="ARRAY[" close="]::text[]" separator=",">
+                        #{g}
+                    </foreach>
+                ) AS g
+                WHERE s.text_content ILIKE '%' || g || '%') AS matched_grams,
+               1 - (s.embedding &lt;=&gt; CAST(#{embedding} AS vector)) AS score
+        FROM video_segment s
+        WHERE EXISTS (
+            SELECT 1 FROM unnest(
+                <foreach collection="grams" item="g" open="ARRAY[" close="]::text[]" separator=",">
+                    #{g}
+                </foreach>
+            ) AS g
+            WHERE s.text_content ILIKE '%' || g || '%'
+        )
+        <if test="videoId != null and videoId != ''">
+            AND s.video_id = #{videoId}
+        </if>
+        ORDER BY score DESC
+        LIMIT #{limit}
+    </select>
+
+    <delete id="deleteByVideoId">
+        DELETE FROM video_segment WHERE video_id = #{videoId}
+    </delete>
+
+    <select id="countByVideoId" resultType="int">
+        SELECT count(*) FROM video_segment WHERE video_id = #{videoId}
+    </select>
+
+    <select id="listByVideoId" resultMap="segmentMap">
+        SELECT * FROM video_segment WHERE video_id = #{videoId} ORDER BY segment_index
+    </select>
+
+    <!-- 全部视频的片段骨架：仅取索引/起止时间/章节标题（不取正文与向量），供视频库列表一次查完 -->
+    <select id="listBriefAll" resultMap="segmentMap">
+        SELECT video_id, segment_index, start_time, end_time, chapter_title
+        FROM video_segment
+        ORDER BY video_id, segment_index
+    </select>
+
+</mapper>

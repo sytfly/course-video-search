@@ -1,0 +1,129 @@
+﻿﻿{
+  "_comment": "检索评估标注：query → 正确答案所在（视频，秒），时间戳偏差在 toleranceSeconds 内算命中。expectedStart 取答案内容所属片段在 video_segment 中的 start_time（即搜索结果里该片段的精确起点），容差 60s。2026-09-26 cue 规则重写并全库重分段后，旧 expectedStart（引用旧片段起点）已机械重锚到「该时刻所在的新片段起点」：v_218 的 172.4→169.11、481.68→374.62、725.04→604.45；v_7e0 的 147.94→0、419.82→307.94；v_3efb18f1 的 337.61→188.06。内容未变，仅片段边界合并/移动。素材：v_218ecb10=黑马 Java 课；v_7e0c4554=铠甲勇士动画（ASR 噪声大，检验闸门）。Recall@K 走 searchRawRanking 测排名，不含线上高置信单条截断；截断导致的不可交付在评估日志中单独标注。",
+  "pairs": [
+    {
+      "query": "三元运算符的格式和执行规则是什么",
+      "videoId": "v_218ecb10ac694b068004109f72cc52a5",
+      "expectedStart": 0.0,
+      "toleranceSeconds": 60
+    },
+    {
+      "query": "关系表达式后面跟问号和冒号该怎么理解",
+      "videoId": "v_218ecb10ac694b068004109f72cc52a5",
+      "expectedStart": 0.0,
+      "toleranceSeconds": 60
+    },
+    {
+      "query": "定义变量记录两个整数的较大值",
+      "videoId": "v_218ecb10ac694b068004109f72cc52a5",
+      "expectedStart": 169.11,
+      "toleranceSeconds": 60
+    },
+    {
+      "query": "用两个变量比较求较大值的代码怎么写",
+      "videoId": "v_218ecb10ac694b068004109f72cc52a5",
+      "expectedStart": 169.11,
+      "toleranceSeconds": 60
+    },
+    {
+      "query": "判断两只老虎的体重是否相同",
+      "videoId": "v_218ecb10ac694b068004109f72cc52a5",
+      "expectedStart": 374.62,
+      "toleranceSeconds": 60
+    },
+    {
+      "query": "键盘录入两只老虎的体重",
+      "videoId": "v_218ecb10ac694b068004109f72cc52a5",
+      "expectedStart": 374.62,
+      "toleranceSeconds": 60
+    },
+    {
+      "query": "为什么不能直接用等号比较然后打印相同或不同",
+      "videoId": "v_218ecb10ac694b068004109f72cc52a5",
+      "expectedStart": 374.62,
+      "toleranceSeconds": 60
+    },
+    {
+      "query": "三个和尚求最高身高怎么比较",
+      "videoId": "v_218ecb10ac694b068004109f72cc52a5",
+      "expectedStart": 604.45,
+      "toleranceSeconds": 60
+    },
+    {
+      "query": "IDEA 里格式化代码的快捷键是什么",
+      "videoId": "v_218ecb10ac694b068004109f72cc52a5",
+      "expectedStart": 604.45,
+      "toleranceSeconds": 60
+    },
+    {
+      "query": "Ctrl+Alt+L 快捷键和哪些软件冲突",
+      "videoId": "v_218ecb10ac694b068004109f72cc52a5",
+      "expectedStart": 604.45,
+      "toleranceSeconds": 60
+    },
+    {
+      "query": "运算符的优先级怎么记",
+      "videoId": "v_218ecb10ac694b068004109f72cc52a5",
+      "expectedStart": 867.02,
+      "toleranceSeconds": 60
+    },
+    {
+      "query": "为什么小括号优先于所有运算符",
+      "videoId": "v_218ecb10ac694b068004109f72cc52a5",
+      "expectedStart": 867.02,
+      "toleranceSeconds": 60
+    },
+    {
+      "query": "何影石到底在不在你这儿",
+      "videoId": "v_7e0c455405f947c4a4a256c144966c6a",
+      "expectedStart": 0.0,
+      "toleranceSeconds": 60
+    },
+    {
+      "query": "土影石被谁抢走了",
+      "videoId": "v_7e0c455405f947c4a4a256c144966c6a",
+      "expectedStart": 0.0,
+      "toleranceSeconds": 60
+    },
+    {
+      "query": "向阳被领养去了哪里",
+      "videoId": "v_7e0c455405f947c4a4a256c144966c6a",
+      "expectedStart": 307.94,
+      "toleranceSeconds": 60
+    },
+    {
+      "query": "熙昭雪獒铠甲的耐力训练",
+      "videoId": "v_7e0c455405f947c4a4a256c144966c6a",
+      "expectedStart": 307.94,
+      "toleranceSeconds": 60
+    },
+    {
+      "_provenance": "developer-draft-2026-09-26，待使用者复核；非独立人工标注",
+      "query": "Redis 分布式锁为什么会误删别的线程加的锁",
+      "videoId": "v_234e259d5c3345649db0c1aa7450a4a8",
+      "expectedStart": 0.0,
+      "toleranceSeconds": 60
+    },
+    {
+      "_provenance": "developer-draft-2026-09-26，待使用者复核；非独立人工标注",
+      "query": "用 for 循环正着打印 1 到 5 怎么写",
+      "videoId": "v_f22b491978454f79958dbee9190734ab",
+      "expectedStart": 519.31,
+      "toleranceSeconds": 60
+    },
+    {
+      "_provenance": "developer-draft-2026-09-26，待使用者复核；非独立人工标注",
+      "query": "Java 里子类继承父类有什么好处",
+      "videoId": "v_3efb18f1eca8434fa6dee547326c5acd",
+      "expectedStart": 188.06,
+      "toleranceSeconds": 60
+    },
+    {
+      "_provenance": "developer-draft-2026-09-26，待使用者复核；非独立人工标注",
+      "query": "扩展赋值运算符加等是怎么计算的",
+      "videoId": "v_e6eef6fb36a94af4b9e15b5d74403dc2",
+      "expectedStart": 0.0,
+      "toleranceSeconds": 60
+    }
+  ]
+}

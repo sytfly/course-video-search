@@ -1,0 +1,68 @@
+# 课程视频语义检索平台 —— 本地基础设施
+# 启动：docker compose up -d
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: vsearch-postgres
+    environment:
+      POSTGRES_DB: vsearch
+      POSTGRES_USER: vsearch
+      POSTGRES_PASSWORD: vsearch123
+    ports:
+      - "${PG_PORT:-5432}:5432"
+    volumes:
+      - vsearch-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vsearch -d vsearch"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:RELEASE.2024-10-13T13-34-11Z
+    container_name: vsearch-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - vsearch-minio:/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: vsearch-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - vsearch-redis:/data
+
+  rmqnamesrv:
+    image: apache/rocketmq:5.3.1
+    container_name: vsearch-rmqnamesrv
+    command: sh mqnamesrv
+    ports:
+      - "9876:9876"
+
+  rmqbroker:
+    image: apache/rocketmq:5.3.1
+    container_name: vsearch-rmqbroker
+    # broker.conf 里把 brokerIP1 固定成 127.0.0.1：默认注册的是容器内网 IP，
+    # 宿主机上的应用拿不到，发送消息会超时（详见该文件注释）
+    command: sh mqbroker -n rmqnamesrv:9876 -c /home/rocketmq/conf/broker.conf --enable-proxy
+    environment:
+      NAMESRV_ADDR: rmqnamesrv:9876
+    volumes:
+      - ./docker/rocketmq/broker.conf:/home/rocketmq/conf/broker.conf
+    ports:
+      - "10911:10911"
+      - "8081:8081"
+    depends_on:
+      - rmqnamesrv
+
+volumes:
+  vsearch-pg:
+  vsearch-minio:
+  vsearch-redis:

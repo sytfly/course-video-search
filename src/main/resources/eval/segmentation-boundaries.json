@@ -1,0 +1,72 @@
+{
+  "_comment": "分段评估真值。口径：话题级「章节书签」边界（学习者会放跳转书签、自包含、可命名），不含同一知识点的讲概念→写码→运行→小结，不标 0 与结尾。v_218ecb10 的 4 条为使用者独立标注；其余 5 集为开发者按同一协议盲标（仅看 ASR 原文，不看算法切点），存在自评偏差，已在评估报告中披露。windowSeconds 取 duration/(ref 数+1)（≈平均段长），与首集 194 口径一致。cue@sentence+depth@chunk 的 hyp 为 2026-09-26 DiscourseMarkerDetector 重写（HARD/GATED 两档）后 SegmentReplayRunner 实测输出（微平均 WD 0.1492，命中 18/19，多切 9，漏切 1）；v_218ecb10 其余 hyp 为首集历史消融存档。",
+  "videos": [
+    {
+      "videoId": "v_218ecb10ac694b068004109f72cc52a5",
+      "provenance": "user",
+      "duration": 971.17,
+      "windowSeconds": 194,
+      "ref": [169.11, 373.35, 603.24, 879.26],
+      "hyp": {
+        "chunk-baseline-k0.8-max300": [169.11, 468.67, 603.24, 831.18],
+        "chunk-k0.5-max300": [169.11, 468.67, 603.24, 831.18],
+        "chunk-k0.8-max180": [169.11, 297.89, 468.67, 603.24, 776.42],
+        "chunk-k0.8-max480": [169.11, 603.24],
+        "sentence-only-k0.8-max300": [72.51, 341.89, 604.45, 737.96],
+        "sentence+cue-as-candidate": [172.4, 367.31, 481.47, 725.04],
+        "sentence+cue-as-cut": [172.4, 374.62, 481.47, 604.45, 725.04, 867.02],
+        "cue@sentence+depth@chunk": [169.11, 374.62, 604.45, 867.02]
+      }
+    },
+    {
+      "videoId": "v_e6eef6fb36a94af4b9e15b5d74403dc2",
+      "provenance": "developer-blind",
+      "duration": 942.01,
+      "windowSeconds": 235.5,
+      "ref": [233.8, 401.3, 662.1],
+      "hyp": {
+        "cue@sentence+depth@chunk": [233.81, 402.53, 663.09]
+      }
+    },
+    {
+      "videoId": "v_f22b491978454f79958dbee9190734ab",
+      "provenance": "developer-blind",
+      "duration": 984.6,
+      "windowSeconds": 246.15,
+      "ref": [77.4, 518.1, 746.3],
+      "hyp": {
+        "cue@sentence+depth@chunk": [77.36, 373.02, 519.31, 747.36]
+      }
+    },
+    {
+      "videoId": "v_234e259d5c3345649db0c1aa7450a4a8",
+      "provenance": "developer-blind",
+      "duration": 1357.31,
+      "windowSeconds": 226.22,
+      "ref": [150.5, 250.5, 418.7, 653.6, 974.7],
+      "hyp": {
+        "cue@sentence+depth@chunk": [252.69, 425.34, 653.58, 918.71, 977.92, 1219.05]
+      }
+    },
+    {
+      "videoId": "v_3efb18f1eca8434fa6dee547326c5acd",
+      "provenance": "developer-blind",
+      "duration": 1044.86,
+      "windowSeconds": 348.29,
+      "ref": [188.1, 419.0],
+      "hyp": {
+        "cue@sentence+depth@chunk": [188.06, 423.38, 596.85, 744.43]
+      }
+    },
+    {
+      "videoId": "v_1840d2ec88464cab85f9cfb2e6eb45a0",
+      "provenance": "developer-blind",
+      "duration": 1167.7,
+      "windowSeconds": 389.23,
+      "ref": [412.3, 824.4],
+      "hyp": {
+        "cue@sentence+depth@chunk": [60.13, 363.85, 424.18, 726.79, 831.28, 930.01]
+      }
+    }
+  ]
+}

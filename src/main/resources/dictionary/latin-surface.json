@@ -1,0 +1,58 @@
+{
+  "comment": "拉丁标识符音近纠错的「有限正确面」。背景：讲师按英文念技术词，ASR 用它听到的音节拼拉丁串，错写是音近而不是手误（Redis→reice/reis/raice，Lua→lu/luva，Ctrl→conttrol/contrl，false→foalse/forse，System→sstem）。本文件只列【正确面】，不枚举错写；匹配由 LatinPhoneticMatcher 按加权音近距离完成。第一版（保守）：只处理完整拉丁 token，不处理代码黏连（intI/newcancanner）、不含数字 token（K4）、不处理全大写变量（STRA/AR）。stopwords 是语料中出现过的合法英文/口语词，任何情况下都不得纠它们。",
+  "minTokenLength": 2,
+  "threshold": 0.75,
+  "shortTokenThreshold": 0.9,
+  "margin": 0.05,
+  "stopwords": [
+    "hello", "world", "yeah", "gpt", "gpt6", "gbt6", "bug", "name", "set", "get",
+    "student", "person", "teacher", "teach", "coder", "number", "value", "key",
+    "call", "phone", "sleep", "address", "gender", "fashion", "girl", "stop",
+    "open", "raise", "rose", "sub", "local", "operator", "script", "max",
+    "alt",
+    "word", "first", "it", "to", "and", "my", "end", "ok", "aok", "co", "te",
+    "ki", "ev", "wa", "ra", "re", "st", "ht", "gro", "oppo", "oppos", "ra",
+    "in", "on", "at", "as", "so", "we", "he", "me", "us", "am", "an", "or",
+    "no", "go", "up", "is", "be", "by", "te"
+  ],
+  "surface": [
+    {"group": "java-keyword", "confidence": 0.97, "terms": [
+      "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char",
+      "class", "continue", "default", "do", "double", "else", "enum", "extends",
+      "final", "finally", "float", "for", "if", "implements", "import",
+      "instanceof", "int", "interface", "long", "native", "new", "package",
+      "private", "protected", "public", "return", "short", "static", "strictfp",
+      "super", "switch", "synchronized", "this", "throw", "throws", "transient",
+      "try", "void", "volatile", "while", "true", "false", "null",
+      "var", "yield", "record", "sealed", "permits"
+    ]},
+    {"group": "jdk-class", "confidence": 0.95, "terms": [
+      "String", "System", "Scanner", "Math", "Object", "Integer", "Long",
+      "Double", "Float", "Boolean", "Character", "Byte", "Short", "Number",
+      "Thread", "Runnable", "Exception", "RuntimeException", "Throwable",
+      "Error", "Class", "StringBuffer", "StringBuilder", "Comparable",
+      "Comparator", "Iterable", "Collection", "List", "ArrayList", "Map",
+      "HashMap", "LinkedHashMap", "TreeMap", "Set", "HashSet", "TreeSet",
+      "Queue", "Deque", "LinkedList", "Iterator", "Optional", "Stream",
+      "Collectors", "Collections", "Arrays", "Objects", "PrintStream",
+      "InputStream", "OutputStream", "BufferedReader", "InputStreamReader",
+      "File", "FileReader", "FileWriter", "Random", "BigInteger", "BigDecimal",
+      "LocalDate", "LocalTime", "LocalDateTime", "DateTimeFormatter",
+      "Duration", "Period", "Instant", "Function", "Predicate", "Consumer",
+      "Supplier", "Files", "Path", "Paths"
+    ]},
+    {"group": "jdk-method", "confidence": 0.9, "terms": [
+      "println", "printf", "print", "nextInt", "nextLine", "nextDouble",
+      "nextBoolean", "parseInt", "indexOf", "toString", "hashCode", "valueOf",
+      "substring", "startsWith", "endsWith", "charAt", "compareTo",
+      "getClass", "notifyAll", "getName", "setName", "forName", "equals",
+      "isEmpty", "keySet", "entrySet", "next"
+    ]},
+    {"group": "course-domain", "confidence": 0.96, "terms": [
+      {"term": "Ctrl", "spoken": ["control"]},
+      {"term": "Lua"},
+      {"term": "Java"},
+      {"term": "Spring"}
+    ]}
+  ]
+}

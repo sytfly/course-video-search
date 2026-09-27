@@ -1,0 +1,193 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: course-video-vsearch
+  datasource:
+    driver-class-name: org.postgresql.Driver
+    url: jdbc:postgresql://${PG_HOST:localhost}:${PG_PORT:5432}/${PG_DB:vsearch}?stringtype=unspecified
+    username: ${PG_USER:vsearch}
+    password: ${PG_PASSWORD:vsearch123}
+  # schema.sql 全部使用 IF NOT EXISTS，重复启动安全
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:db/schema.sql
+  servlet:
+    multipart:
+      max-file-size: 2GB
+      max-request-size: 2GB
+
+mybatis-plus:
+  mapper-locations: classpath*:/mapper/**/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    banner: false
+
+vsearch:
+  # 硅基流动（ASR / embedding / 章节标题）。密钥只从环境变量读取，切勿在此填写默认值：
+  # 本文件会进版本库，写默认值等于把密钥公开。未配置时 ASR 与检索不可用、章节标题自动降级。
+  siliconflow:
+    base-url: ${SILICONFLOW_BASE_URL:https://api.siliconflow.cn/v1}
+    # 优先 SILICONFLOW_API_KEY；本机若以通用名 AI_API_KEY 存放同一把硅基流动密钥则回退读取，
+    # 避免要求用户把同一密钥存两份。两处都没有时为空（ASR/检索不可用，章节标题自动降级）。
+    api-key: ${SILICONFLOW_API_KEY:${AI_API_KEY:}}
+    asr-model: FunAudioLLM/SenseVoiceSmall
+    embedding-model: BAAI/bge-m3
+    chat-model: Qwen/Qwen2.5-7B-Instruct
+    embedding-dim: 1024
+    # 单次 embedding 批量条数（bge-m3 上限 8192 token）
+    embedding-batch-size: 16
+    # 单次 API 调用的响应读超时（秒）。
+    # 10 路并发 / 20s 分块 / 50 块 的三次实测（同一视频、同一音频）：
+    #   120s 超时 → ASR 355.7s，单块均值 50.7s，3 次超时重试，尾波 169.8s
+    #   180s 超时 → ASR 444.5s，单块均值 69.3s，0 次重试，尾波 156.2s
+    #   180s 超时 → ASR 304.5s，单块均值 55.1s，0 次重试，尾波  49.9s
+    # 结论：后两次配置完全相同，ASR 时长却差 1.46 倍（444.5 vs 304.5），
+    # 说明运行间波动（服务端单请求延迟在 24.6~69.3s 间随机游走）约 140s，
+    # 远大于超时值本身的影响（约 14s：只决定慢块是“白等 120s 再重跑”还是“直接跑完”）。
+    # 保留 180s 的理由：单块最大实测 159.9s / 160.6s，确实存在合法耗时 >120s 的块，
+    # 120s 会误杀它们并触发重试；180s 无副作用，但不要指望它大幅提速。
+    response-timeout-seconds: 180
+  redis:
+    host: ${REDIS_HOST:localhost}
+    port: ${REDIS_PORT:6379}
+  minio:
+    endpoint: http://localhost:9000
+    access-key: minioadmin
+    secret-key: minioadmin
+    bucket: course-video
+    # 前端播放地址（为空则与 endpoint 相同）
+    public-endpoint: http://localhost:9000
+  # ffmpeg / ffprobe 可执行文件：默认从 PATH 查找（多数系统装了就是 ffmpeg / ffprobe）。
+  # 未加入 PATH 时用环境变量 FFMPEG_PATH / FFPROBE_PATH 指定绝对路径，不要把本机绝对路径写在这里。
+  ffmpeg:
+    ffmpeg-path: ${FFMPEG_PATH:ffmpeg}
+    ffprobe-path: ${FFPROBE_PATH:ffprobe}
+    work-dir: ${VSEARCH_WORK_DIR:./data/ffmpeg}
+    # ASR 目标音频码率（16k 单声道 mp3，40 分钟约 7MB，满足 50MB 限制）
+    audio-bitrate: 24k
+    # VAD：噪声门限 / 最短静音秒
+    vad-noise-db: -35
+    vad-min-silence: 0.8
+    # ASR 分块目标时长（秒），[min, max]
+    # 实测：块放大到 60s 可提速 3.6 倍，但话题边界只能落在块边界上，
+    # 分段数会从 5 段退化到 3 段（跳转窗口 314~331s），故保持 20s 档、改用并发换速度
+    chunk-min-seconds: 8
+    chunk-target-seconds: 20
+    chunk-max-seconds: 30
+  # 分片上传（大文件断点续传）：前端 File.slice 切片并行上传，服务端按序合并后走与单次上传
+  # 完全相同的入库路径（内容指纹去重 + 上传锁 + 后台预处理）。
+  # 收益是「中断不重传 + 精确进度 + 单请求失败只损失几 MB」，而不是上传更快（受上行带宽限制）。
+  upload:
+    # 单个文件上限，与 spring.servlet.multipart.max-file-size 保持一致
+    max-file-size: 2GB
+    # 客户端未指定分片大小（或指定值超出 [256KB, 64MB]）时的默认值
+    chunk-size: 5MB
+    # 上传会话（Redis 分片位图 + 已落盘分片）保留时长：断点续传的有效窗口，超时后需重新上传
+    session-ttl-hours: 24
+  # 话题分段
+  segment:
+    # fixed | semantic | acoustic
+    strategy: semantic
+    fixed:
+      window-seconds: 60
+    semantic:
+      min-segment-seconds: 30
+      max-segment-seconds: 300
+      # TextTiling 边界深度阈值系数：depth > mean + k * std
+      # 实测（971.17s 三元运算符课程，真值边界 169.11/373.35/603.24/879.26）：
+      #   在 ASR 块粒度上 k ∈ [0.4, 2.4] 分段结果完全一致；k ≤ 0.3 只把硬切点从 468.67
+      #   挪到 488.67，k ≥ 2.5 反而丢掉 169.11。故 k 对本题不敏感，维持 0.8。
+      # 深度固定算在块粒度、只用于兜底（见 SemanticSegmenter 的粒度解耦说明）：实测本视频
+      # 6 个切点全部来自话语标记，depth 未触发；无标记的动画素材（66 块/1443s，话语标记 0 处）
+      # 则由 depth + max-segment-seconds 切出 5 个边界（最长段 307.94s），兜底路径可用。
+      # 2026-09-26 扩到 6 视频/19 条边界后：旧 cue 规则（各位同学/接下来我们/下面我们）在 Redis Lua、
+      # 继承两集 8 漏 7，且「下面我们」类动手引导句造成多切。DiscourseMarkerDetector 已重写为
+      # HARD（正式话题宣告 8 式）+ GATED（设问须 20s 内有收束语）两档；离线探针 15/19 命中、0 多切，
+      # 护栏见 DiscourseMarkerDetectorTest。剩 3 条（169.11/233.8/77.4）历史上由 depth 兜底，
+      # Redis 150.5 无任何文本信号；cue+depth 端到端 WindowDiff 待 replay 实测（需 embedding key）。
+      boundary-k: 0.8
+    acoustic:
+      min-segment-seconds: 30
+      max-segment-seconds: 300
+      # 超过该时长的静音才作为话题边界候选
+      pause-seconds: 1.2
+  # 异步流水线：local=本地线程池（默认，免依赖）；rocketmq=走 MQ
+  pipeline:
+    type: local
+    # 视频任务级并发：同时处理的视频个数
+    local-threads: 2
+    # 单视频内 ASR 音频块的块级并发数（与 local-threads 无关，独立线程池）
+    # 实测（同一视频、同一 50 块分块方案）：
+    #   5 路 → ASR 有效 9分30秒~10分18秒，单请求均值 51.3~54.1s（对串行约 4.95 倍线性加速）
+    #   10 路 → ASR 有效 5分56秒~7分24秒，单请求均值 50.7~69.3s（对 5 路仅约 1.46 倍）
+    # 并发翻倍只换来 1.46 倍，且单请求延迟未随并发上升，说明瓶颈在服务端整体吞吐上限，
+    # 继续上调（15/20）收益有限且更容易撞超时，故停在 10 路
+    asr-concurrency: 10
+    # 启动自愈：启动时把「状态仍是 PENDING/PROCESSING、但处理锁空闲」的任务重新入队，
+    # 复用 video_asr_chunk 断点续跑。进程被强杀后重启不再丢任务，前端也不会永久停在最后一格。
+    startup-recovery: true
+  rocketmq:
+    name-server: localhost:9876
+    group: vsearch-producer-group
+    consumer-group: vsearch-consumer-group
+    topic: VIDEO_PROCESS
+  # 硅基流动 API 保护
+  ratelimit:
+    permits-per-second: 2
+  retry:
+    max-attempts: 5
+    base-delay-ms: 1000
+    max-delay-ms: 30000
+  search:
+    # 纯向量 | hybrid（向量召回 ∪ 关键词召回，统一按语义相关性排序）
+    mode: hybrid
+    # 召回候选池：闸门与排序都在池内进行
+    candidate-pool: 50
+    # 两档软闸门（相关性 = 余弦相似度 + keyword-boost × 关键词命中率，0~1）：
+    #   >= min-similarity        → 高置信，按 topK 正常返回
+    #   [floor, min-similarity)  → 最多返回 low-confidence-limit 条并全部标 lowConfidence，前端提示「仅供参考」
+    #   <  floor                 → 一律不返回，返回空代表确实没有相关内容
+    # 为什么不是单一阈值（2026-09-25 实测，16 条真实标注 / 2 份素材 / 38 片段）：
+    #   正确片段的余弦跨 0.502~0.880（IDEA 快捷键 0.502、Ctrl+Alt+L 0.516、关系表达式 0.523）；
+    #   而无关问句的 top1 余弦也有 0.421~0.537（天气 0.537、签证 0.479、Python 0.473）——两簇重叠，
+    #   单一硬阈值必然二选一地出错：旧值 0.6 时片内 Recall@3 = 68.75%（16 条丢 5，其中 3 条被整条滤空），
+    #   关掉闸门则是 100%。故 0.6 保留为「高置信阈值」不再当过滤器用，另加 0.4 低地板兜底。
+    # 低置信给几条（2026-09-26 复测，n=20 / 11 视频新分段）：曾只给 1 条，但 5 条正确答案
+    #   实际排在第 2/3 名（best 分仍低于 0.6），单条截断导致全库交付口径 @5 仅 80%；放宽到 3 条弱展示后
+    #   这 5 条全部可交付。代价：完全无关的查询（实测「今天天气怎么样」best 0.549、高于 floor）
+    #   也会看到 3 条而非 1 条噪声——全部带 lowConfidence 标记且前端顶部有「仅供参考」整批提示，
+    #   不是被低地板挡住的：floor 只能挡住 <0.4 的，0.4~0.6 区间本来就与合法弱结果重叠。
+    min-similarity: 0.6
+    low-confidence-limit: 3
+    min-similarity-floor: 0.4
+    # 关键词精确命中的加成上限（0 即关闭）；命中率=命中 bigram 数/查询 bigram 总数
+    keyword-boost: 0.1
+  chapter:
+    enabled: true
+  progress:
+    # 进度在 Redis 中的保留时间（小时）
+    ttl-hours: 24
+    # 进度静默超过该秒数且处理锁空闲时，GET /api/video/{id} 才把未完成任务标为 interrupted=true。
+    # 前端 SSE 静默后据此提示「任务已中断」，而不是让进度条一直干等；60s 远大于正常阶段的推送间隔。
+    # 注意「排队等锁」也是同样的外部特征（状态未完成 + 锁空闲 + 进度不刷新），故该判定还须
+    # 结合 InFlightTaskRegistry（本进程已接手但未结束的任务登记表）——已登记的一律不算中断。
+    interrupted-after-seconds: 60
+  eval:
+    # 启动时读取 resources/eval/*.json 输出分段 WindowDiff / 检索 Recall@1/3/5 评估报告
+    enabled: false
+    # 离线观测：不配置 replay-video-id 即不启用；
+    #   默认复算分段：读 video_asr_chunk + video.duration 重跑当前分段策略，打印边界与命中统计；
+    #   dump-segments=true 改为导出已落库的 video_segment（搜索返回的正是这些片段，供检索 QA 标注）。
+    # 多个视频用逗号分隔。
+    # 用法：
+    #   复算分段：mvn spring-boot:run "-Dspring-boot.run.arguments=--vsearch.eval.replay-video-id=v_aaa"
+    #   导出片段：mvn spring-boot:run "-Dspring-boot.run.arguments=--vsearch.eval.replay-video-id=v_aaa,v_bbb --vsearch.eval.dump-segments=true"
+    # 叠加 --logging.level.com.course.vsearch.service.segment=DEBUG 可同时看深度序列与话语标记候选。
+
+logging:
+  level:
+    com.course.vsearch: INFO
