@@ -1,7 +1,6 @@
 # 课程视频语义检索平台
 
 [![CI](https://github.com/sytfly/course-video-search/actions/workflows/ci.yml/badge.svg)](https://github.com/sytfly/course-video-search/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/tag/sytfly/course-video-search?label=release)](https://github.com/sytfly/course-video-search/releases)
 ![Java](https://img.shields.io/badge/Java-17-orange)
 ![Spring Boot](https://img.shields.io/badge/Spring_Boot-3.3.5-brightgreen)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-pgvector-336791)
