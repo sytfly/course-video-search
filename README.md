@@ -1,10 +1,26 @@
 # 课程视频语义检索平台
 
+[![CI](https://github.com/sytfly/course-video-search/actions/workflows/ci.yml/badge.svg)](https://github.com/sytfly/course-video-search/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/tag/sytfly/course-video-search?label=release)](https://github.com/sytfly/course-video-search/releases)
+![Java](https://img.shields.io/badge/Java-17-orange)
+![Spring Boot](https://img.shields.io/badge/Spring_Boot-3.3.5-brightgreen)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-pgvector-336791)
+![License](https://img.shields.io/badge/License-MIT-blue)
+
 用自然语言在课程视频里找内容，直接跳到对应时间点播放。
 
 上传一节课程视频 → 自动转写、纠错、按话题分段、向量化入库 → 搜索「三元运算符的格式」→ 返回命中片段与时间戳，点击即在播放器跳转。
 
 面向**个人自托管 / 小团队自建**场景：注册一个账号就是一个独立空间，只看得到、搜得到、播得到、删得掉自己上传的视频，账号之间数据互不可见。不做角色权限、配额与共享资源池。
+
+<!-- 界面预览：把三张真实截图放进 docs/images/ 后，取消下面这段注释即可。
+     不要提交空占位图——GitHub 上会渲染成破图，比没有更差。
+## 界面预览
+
+| 上传与处理进度 | 检索结果（带时间戳） | 播放器跳播 |
+| --- | --- | --- |
+| ![上传](docs/images/upload.png) | ![检索](docs/images/search.png) | ![播放](docs/images/player.png) |
+-->
 
 ## 功能亮点
 
