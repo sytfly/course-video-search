@@ -37,6 +37,17 @@
             <artifactId>spring-boot-starter-validation</artifactId>
         </dependency>
 
+        <!-- 可观测性：actuator 暴露 health/指标端点，micrometer 以 Prometheus 格式输出业务指标。
+             埋点是纯叠加：只记录，不参与任何业务判断（见 observability/BusinessMetrics）。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+
         <!-- MyBatis-Plus (Spring Boot 3) -->
         <dependency>
             <groupId>com.baomidou</groupId>

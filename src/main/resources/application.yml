@@ -19,6 +19,32 @@ spring:
       max-file-size: 2GB
       max-request-size: 2GB
 
+# 可观测性：只暴露 health（存活探针）与 prometheus（指标抓取）。
+# 不 include env/beans/configprops/heapdump/loggers —— 它们会把配置项（含密钥）暴露成明文。
+# 注意：/actuator/** 不在 /api/** 之下，由 SecurityConfig 的 anyRequest().permitAll() 放行；
+# 生产部署应改为独立 management 端口或只允许监控网段访问。
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  endpoint:
+    health:
+      # 不向前端暴露数据库/对象存储/磁盘等组件明细
+      show-details: never
+  metrics:
+    tags:
+      application: course-video-vsearch
+    distribution:
+      # 输出直方图（_bucket 序列），Prometheus 侧用 histogram_quantile() 算 p50/p90/p99。
+      # 不用客户端的 distribution.percentiles：多实例下客户端分位数无法合并，
+      # 且该项在 Boot 3 是按 meter 名做 Map 配置，写单个数字会绑定失败。
+      percentiles-histogram:
+        vsearch.search.duration: true
+        vsearch.pipeline.stage.duration: true
+        vsearch.asr.chunk.duration: true
+        vsearch.ratelimit.wait: true
+
 mybatis-plus:
   mapper-locations: classpath*:/mapper/**/*.xml
   configuration:

@@ -1,6 +1,7 @@
 package com.course.vsearch.service.chapter;
 
 import com.course.vsearch.config.VSearchProperties;
+import com.course.vsearch.observability.BusinessMetrics;
 import com.course.vsearch.service.ratelimit.ApiRateLimiter;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
@@ -32,6 +33,7 @@ public class ChapterTitleService {
 
     private final VSearchProperties props;
     private final ApiRateLimiter rateLimiter;
+    private final BusinessMetrics metrics;
 
     private ChatModel chatModel;
 
@@ -66,6 +68,9 @@ public class ChapterTitleService {
                     .messages(SystemMessage.from(SYSTEM_PROMPT),
                             UserMessage.from("片段文字：" + snippet))
                     .build());
+            // 章节标题走 LangChain4j 自带的 maxRetries，不经 RetryExecutor，
+            // 故这里单独记外部调用：否则「第三方调用次数」会漏掉 LLM 这一路
+            metrics.externalCall("chat", "ok");
             String title = response.aiMessage().text();
             if (title != null) {
                 title = title.replaceAll("[\\r\\n\"“”]", "").trim();
@@ -76,6 +81,7 @@ public class ChapterTitleService {
             return title;
         } catch (Exception e) {
             // 标题是 P1 增强能力，失败不阻断入库
+            metrics.externalCall("chat", "error");
             log.warn("章节标题生成失败，跳过: {}", e.getMessage());
             return null;
         }

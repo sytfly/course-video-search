@@ -9,8 +9,10 @@ import com.course.vsearch.entity.VideoSegment;
 import com.course.vsearch.handler.PgVectorTypeHandler;
 import com.course.vsearch.mapper.VideoMapper;
 import com.course.vsearch.mapper.VideoSegmentMapper;
+import com.course.vsearch.observability.BusinessMetrics;
 import com.course.vsearch.security.TenantContext;
 import com.course.vsearch.service.ai.EmbeddingService;
+import io.micrometer.core.instrument.Timer;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -44,32 +46,43 @@ public class SearchService {
     private final VideoSegmentMapper segmentMapper;
     private final VideoMapper videoMapper;
     private final VSearchProperties props;
+    private final BusinessMetrics metrics;
 
     public List<SearchResult> search(SearchRequest request) {
-        List<VideoSegment> ranked = rankCandidates(request);
-        Search cfg = props.getSearch();
+        Timer.Sample sample = metrics.startSearch();
+        try {
+            List<VideoSegment> ranked = rankCandidates(request);
+            Search cfg = props.getSearch();
 
-        boolean highConfidence = !ranked.isEmpty() && ranked.get(0).getScore() >= cfg.getMinSimilarity();
-        // 高置信按请求 topK 正常交付；低置信只给前 lowConfidenceLimit 条弱展示（全部打 lowConfidence 标记，
-        // 前端逐条徽标 + 整批提示）——实测 5/20 条正确答案排在第 2/3 名，单条截断会把答案截没。
-        // lowConfidenceLimit 同时受 topK 约束：请求只要 1 条时不会多给。
-        int limit = highConfidence
-                ? request.getTopK()
-                : Math.min(cfg.getLowConfidenceLimit(), request.getTopK());
-        List<SearchResult> results = ranked.stream()
-                .limit(limit)
-                .map(seg -> toResult(seg, cfg.getMinSimilarity()))
-                .toList();
+            boolean highConfidence = !ranked.isEmpty() && ranked.get(0).getScore() >= cfg.getMinSimilarity();
+            // 高置信按请求 topK 正常交付；低置信只给前 lowConfidenceLimit 条弱展示（全部打 lowConfidence 标记，
+            // 前端逐条徽标 + 整批提示）——实测 5/20 条正确答案排在第 2/3 名，单条截断会把答案截没。
+            // lowConfidenceLimit 同时受 topK 约束：请求只要 1 条时不会多给。
+            int limit = highConfidence
+                    ? request.getTopK()
+                    : Math.min(cfg.getLowConfidenceLimit(), request.getTopK());
+            List<SearchResult> results = ranked.stream()
+                    .limit(limit)
+                    .map(seg -> toResult(seg, cfg.getMinSimilarity()))
+                    .toList();
+            metrics.searchDropped("truncate", ranked.size() - results.size());
 
-        if (results.isEmpty()) {
-            log.info("检索无结果：query=[{}]，候选全部低于低地板 {}",
-                    request.getQuery(), cfg.getMinSimilarityFloor());
-        } else if (!highConfidence) {
-            log.info("检索无高置信结果：query=[{}]，best={}（低于 {}），返回前 {} 条低置信候选",
-                    request.getQuery(), String.format("%.3f", results.get(0).getScore()), cfg.getMinSimilarity(),
-                    results.size());
+            if (results.isEmpty()) {
+                log.info("检索无结果：query=[{}]，候选全部低于低地板 {}",
+                        request.getQuery(), cfg.getMinSimilarityFloor());
+            } else if (!highConfidence) {
+                log.info("检索无高置信结果：query=[{}]，best={}（低于 {}），返回前 {} 条低置信候选",
+                        request.getQuery(), String.format("%.3f", results.get(0).getScore()), cfg.getMinSimilarity(),
+                        results.size());
+            }
+            metrics.searchFinished(sample, "api",
+                    results.isEmpty() ? "empty" : highConfidence ? "high" : "low");
+            return results;
+        } catch (RuntimeException e) {
+            // 失败也要计入延迟分布，否则 p99 会把失败样本整个漏掉
+            metrics.searchFinished(sample, "api", "error");
+            throw e;
         }
-        return results;
     }
 
     /**
@@ -79,10 +92,16 @@ public class SearchService {
      * 「正确片段在排第几」与「闸门会不会把它交付出去」两件不同的事，故排名与闸门分开测。
      */
     public List<SearchResult> searchRawRanking(SearchRequest request) {
-        return rankCandidates(request).stream()
+        Timer.Sample sample = metrics.startSearch();
+        List<VideoSegment> ranked = rankCandidates(request);
+        List<SearchResult> results = ranked.stream()
                 .limit(request.getTopK())
                 .map(seg -> toResult(seg, props.getSearch().getMinSimilarity()))
                 .toList();
+        metrics.searchDropped("truncate", ranked.size() - results.size());
+        // entry=eval 与线上接口区分开：评测跑在启动阶段，混进 api 会污染线上延迟分布
+        metrics.searchFinished(sample, "eval", "raw");
+        return results;
     }
 
     /** 双路召回 → 相关性打分 → floor 过滤 → 按分排序；不做高置信截断 */
@@ -97,6 +116,7 @@ public class SearchService {
 
         List<VideoSegment> vectorHits = segmentMapper.vectorTopN(
                 vectorLiteral, request.getVideoId(), tenantId, pool);
+        metrics.searchHits("vector", vectorHits.size());
 
         List<VideoSegment> candidates;
         List<String> grams = List.of();
@@ -105,20 +125,25 @@ public class SearchService {
             List<VideoSegment> keywordHits = grams.isEmpty()
                     ? List.of()
                     : segmentMapper.keywordTopN(grams, vectorLiteral, request.getVideoId(), tenantId, pool);
+            metrics.searchHits("keyword", keywordHits.size());
             candidates = merge(vectorHits, keywordHits);
             log.debug("混合检索：向量 {}，关键词 {}，候选 {}",
                     vectorHits.size(), keywordHits.size(), candidates.size());
         } else {
             candidates = vectorHits;
         }
+        metrics.searchHits("merged", candidates.size());
 
         Search cfg = props.getSearch();
         int gramCount = grams.size();
-        return candidates.stream()
+        List<VideoSegment> survivors = candidates.stream()
                 .peek(seg -> seg.setScore(relevance(seg, gramCount, cfg.getKeywordBoost())))
                 .filter(seg -> seg.getScore() >= cfg.getMinSimilarityFloor())
                 .sorted(Comparator.comparingDouble(VideoSegment::getScore).reversed())
                 .toList();
+        // 被低地板滤掉的数量即「召回池里有多少是噪声」，是后面调 floor / 换召回源时的直接依据
+        metrics.searchDropped("floor", candidates.size() - survivors.size());
+        return survivors;
     }
 
     /**

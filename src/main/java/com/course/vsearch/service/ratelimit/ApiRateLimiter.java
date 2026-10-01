@@ -1,5 +1,6 @@
 package com.course.vsearch.service.ratelimit;
 
+import com.course.vsearch.observability.BusinessMetrics;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -22,6 +23,7 @@ public class ApiRateLimiter {
 
     private final RedissonClient redisson;
     private final com.course.vsearch.config.VSearchProperties props;
+    private final BusinessMetrics metrics;
 
     @PostConstruct
     public void init() {
@@ -33,8 +35,10 @@ public class ApiRateLimiter {
         log.info("令牌桶限流初始化: {} permits/s", props.getRatelimit().getPermitsPerSecond());
     }
 
-    /** 阻塞直到获取一个令牌 */
+    /** 阻塞直到获取一个令牌。等待耗时记入指标：等待变长即说明配额成了流水线瓶颈 */
     public void acquire() {
+        long began = System.nanoTime();
         redisson.getRateLimiter(LIMITER_KEY).acquire();
+        metrics.rateLimitWait((System.nanoTime() - began) / 1_000_000);
     }
 }

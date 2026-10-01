@@ -184,6 +184,50 @@ setx FFPROBE_PATH "C:/tools/ffmpeg/bin/ffprobe.exe"
 - `--vsearch.eval.replay-correct=true`：复算术语纠错，不耗任何外部配额
 - `--vsearch.eval.enabled=true`：输出 WindowDiff + 双层口径检索报告
 
+## 可观测性
+
+`spring-boot-starter-actuator` + `micrometer-registry-prometheus`，只暴露两个端点：
+
+| 端点 | 用途 |
+| --- | --- |
+| `GET /actuator/health` | 存活探针，只返回 `{"status":"UP"}`（`show-details: never`，不泄露组件明细） |
+| `GET /actuator/prometheus` | Prometheus 抓取格式的全部指标 |
+
+未 include `env` / `beans` / `configprops` / `heapdump` / `loggers`——它们会把配置项（含密钥）暴露成明文。`/actuator/**` 不在 `/api/**` 之下，由 `SecurityConfig` 的 `anyRequest().permitAll()` 放行，**生产部署应改为独立 management 端口或只放行监控网段**。
+
+业务指标统一 `vsearch.` 前缀，全部集中在 [BusinessMetrics](src/main/java/com/course/vsearch/observability/BusinessMetrics.java)（口径集中在一处，避免分散在十几个调用点后漂移）。埋点是纯叠加：只记录，不参与任何业务判断，也不改变原有控制流。
+
+| 指标 | 类型 | 标签 | 含义 |
+| --- | --- | --- | --- |
+| `vsearch_search_duration_seconds` | Timer | `entry`=api/eval、`result`=high/low/empty/raw/error | 检索端到端延迟（含 query 向量化、两路召回、排序、闸门） |
+| `vsearch_search_hits` | Summary | `source`=vector/keyword/merged | 三路各自候选条数（两路召回实际捞回多少） |
+| `vsearch_search_dropped` | Summary | `reason`=floor/truncate | 被闸门淘汰数：`floor`=低于 0.4 地板被丢弃，`truncate`=低置信截断到 3 条 |
+| `vsearch_pipeline_stage_duration_seconds` | Timer | `stage`=ProcessStage、`result`=ok/error | 各阶段耗时（下载 / VAD / ASR / 纠错 / 分段 / 向量化 / 章节） |
+| `vsearch_pipeline_task_total` | Counter | `result`=success/failed/skipped | 任务终态计数（`skipped`=锁被其他实例持有或已完成，幂等跳过） |
+| `vsearch_asr_chunk_duration_seconds` | Timer | `result`=ok/reused/failed | ASR 单块耗时分布（`reused`=断点复用，用于观察复用率） |
+| `vsearch_external_call_total` | Counter | `api`=asr/embed/chat、`result`=ok/error | 第三方调用次数 |
+| `vsearch_external_retry_total` | Counter | `api`=asr/embed | 重试次数（429/5xx 走指数退避重试时 +1） |
+| `vsearch_ratelimit_wait_seconds` | Timer | — | 令牌桶等待耗时；等待变长即说明配额成了流水线瓶颈 |
+
+两个实现细节值得留意：
+
+- **标签值必须收敛**。`RetryExecutor` 里的调用名是 `ASR#12` 这种带块下标的字符串，直接当标签会单视频产生 60 条时间序列、打爆指标基数，故用白名单归一成 `asr` / `embed` / `other`。
+- **用直方图而非客户端分位数**。计时类指标配了 `percentiles-histogram`，p50/p90/p99 由 Prometheus 侧 `histogram_quantile()` 算——客户端分位数在多实例下无法合并（见 `application.yml` 注释）。
+
+实测（跑一次离线评测通道，20 条 QA × 全库/片内两档 = 38 次检索）：
+
+```
+vsearch_search_duration_seconds_count{entry="eval",result="raw"} 38   sum 21.06s  max 1.14s
+vsearch_search_hits_sum{source="vector"}  1095   # 平均每次 28.8 条
+vsearch_search_hits_sum{source="keyword"}  680   # 平均每次 17.9 条
+vsearch_search_dropped_count{reason="floor"}    30   # 38 次里 30 次有候选被 0.4 地板丢弃
+vsearch_search_dropped_count{reason="truncate"} 19   # 一半的查询被低置信截断到 3 条
+vsearch_external_call_total{api="embed",result="ok"} 38
+vsearch_ratelimit_wait_seconds_count 39  sum 10.96s  max 0.758s
+```
+
+`truncate` 38 次里命中 19 次（正好一半）就是「低置信只给 3 条」这条线上策略的实际影响面——这类数字以前只能靠读日志猜。
+
 ## 已知局限
 
 故意写在这里——这些都是真实存在的，不是待办清单：

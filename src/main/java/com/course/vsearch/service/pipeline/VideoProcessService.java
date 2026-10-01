@@ -7,6 +7,7 @@ import com.course.vsearch.entity.Video;
 import com.course.vsearch.entity.VideoSegment;
 import com.course.vsearch.mapper.VideoMapper;
 import com.course.vsearch.mapper.VideoSegmentMapper;
+import com.course.vsearch.observability.BusinessMetrics;
 import com.course.vsearch.service.ai.AsrLine;
 import com.course.vsearch.service.ai.AsrService;
 import com.course.vsearch.service.ai.EmbeddingService;
@@ -67,6 +68,7 @@ public class VideoProcessService {
     private final ProgressService progressService;
     private final InFlightTaskRegistry inFlightRegistry;
     private final RedissonClient redisson;
+    private final BusinessMetrics metrics;
 
     /**
      * 后台处理入口：本地线程池与 RocketMQ 消费者都没有登录上下文，
@@ -92,6 +94,7 @@ public class VideoProcessService {
         }
         if (!locked) {
             log.info("视频正在被其他实例处理，跳过: {}", videoId);
+            metrics.task("skipped");
             return;
         }
 
@@ -106,6 +109,7 @@ public class VideoProcessService {
             log.info("视频已处理完成，幂等跳过: {}", videoId);
             inFlightRegistry.clear(videoId);
             lock.unlock();
+            metrics.task("skipped");
             return;
         }
 
@@ -114,10 +118,13 @@ public class VideoProcessService {
             markStatus(video, VideoStatus.PROCESSING, null);
             publish(videoId, ProcessStage.UPLOADED, 5, "开始处理");
 
-            sourceFile = downloadSource(video);
+            // sourceFile 在 try 内赋值、finally 里删除；downloadSource 抛受检异常，故用 Callable 包计时
+            Path downloaded = metrics.stage(ProcessStage.UPLOADED, () -> downloadSource(video));
+            sourceFile = downloaded;
             publish(videoId, ProcessStage.AUDIO_EXTRACT, 8, "提取音频");
 
-            try (AudioPreprocessResult audio = audioPreprocess.prepare(sourceFile, videoId)) {
+            try (AudioPreprocessResult audio =
+                         metrics.stage(ProcessStage.VAD, () -> audioPreprocess.prepare(downloaded, videoId))) {
                 publish(videoId, ProcessStage.VAD, 15,
                         "VAD 完成，" + audio.silences().size() + " 个静音段，"
                                 + audio.chunks().size() + " 个识别分块");
@@ -133,60 +140,69 @@ public class VideoProcessService {
                 }
 
                 // 1. 分块 ASR（15% -> 65%）
-                List<AsrLine> rawLines = asrService.transcribe(videoId, video.getTenantId(), audio,
-                        p -> publish(videoId, ProcessStage.ASR, 15 + (int) (p * 0.50),
-                                "语音识别中 " + p + "%"));
+                List<AsrLine> rawLines = metrics.stage(ProcessStage.ASR, () ->
+                        asrService.transcribe(videoId, video.getTenantId(), audio,
+                                p -> publish(videoId, ProcessStage.ASR, 15 + (int) (p * 0.50),
+                                        "语音识别中 " + p + "%")));
                 if (rawLines.isEmpty()) {
                     throw new IllegalStateException("ASR 未识别到任何语音内容");
                 }
 
                 // 2. 术语纠错（65% -> 72%）
-                List<AsrLine> lines = new ArrayList<>(rawLines.size());
-                int correctedCount = 0;
-                for (AsrLine line : rawLines) {
-                    CorrectionResult r = terminologyService.correct(line.text());
-                    if (r.changed()) {
-                        correctedCount++;
+                List<AsrLine> lines = metrics.stage(ProcessStage.CORRECT, () -> {
+                    List<AsrLine> corrected = new ArrayList<>(rawLines.size());
+                    int correctedCount = 0;
+                    for (AsrLine line : rawLines) {
+                        CorrectionResult r = terminologyService.correct(line.text());
+                        if (r.changed()) {
+                            correctedCount++;
+                        }
+                        corrected.add(new AsrLine(line.start(), line.end(), r.corrected()));
                     }
-                    lines.add(new AsrLine(line.start(), line.end(), r.corrected()));
-                }
-                log.info("[{}] 术语纠错完成，{}/{} 句发生修正", videoId, correctedCount, lines.size());
+                    log.info("[{}] 术语纠错完成，{}/{} 句发生修正", videoId, correctedCount, corrected.size());
+                    return corrected;
+                });
                 publish(videoId, ProcessStage.CORRECT, 72, "术语纠错完成");
 
                 // 3. 话题分段（72% -> 80%）
                 SegmentContext ctx = new SegmentContext(videoId, audio.duration(),
                         lines, audio.silences());
-                List<TopicSegment> topics = segmentationService.segment(ctx);
+                List<TopicSegment> topics = metrics.stage(ProcessStage.SEGMENT,
+                        () -> segmentationService.segment(ctx));
                 publish(videoId, ProcessStage.SEGMENT, 80, "话题分段完成，" + topics.size() + " 段");
 
                 // 4. 段向量化（80% -> 90%）
                 List<String> texts = topics.stream().map(TopicSegment::getText).toList();
-                List<float[]> vectors = embeddingService.embedBatch(texts);
+                List<float[]> vectors = metrics.stage(ProcessStage.EMBED,
+                        () -> embeddingService.embedBatch(texts));
                 publish(videoId, ProcessStage.EMBED, 90, "向量化完成");
 
                 // 5. 章节标题 + 落库（90% -> 99%）
                 String strategy = segmentationService.currentStrategy().name();
-                segmentMapper.deleteByVideoId(videoId);
-                for (int i = 0; i < topics.size(); i++) {
-                    TopicSegment seg = topics.get(i);
-                    String title = chapterTitleService.generateTitle(seg.getText());
-                    int percent = 90 + (int) (9.0 * (i + 1) / Math.max(1, topics.size()));
-                    publish(videoId, ProcessStage.CHAPTER, percent,
-                            "生成章节标题 " + (i + 1) + "/" + topics.size());
+                metrics.stage(ProcessStage.CHAPTER, () -> {
+                    segmentMapper.deleteByVideoId(videoId);
+                    for (int i = 0; i < topics.size(); i++) {
+                        TopicSegment seg = topics.get(i);
+                        String title = chapterTitleService.generateTitle(seg.getText());
+                        int percent = 90 + (int) (9.0 * (i + 1) / Math.max(1, topics.size()));
+                        publish(videoId, ProcessStage.CHAPTER, percent,
+                                "生成章节标题 " + (i + 1) + "/" + topics.size());
 
-                    VideoSegment entity = new VideoSegment();
-                    entity.setVideoId(videoId);
-                    entity.setTenantId(video.getTenantId());
-                    entity.setSegmentIndex(i);
-                    entity.setStartTime(seconds(seg.getStart()));
-                    entity.setEndTime(seconds(seg.getEnd()));
-                    entity.setTextContent(seg.getText());
-                    entity.setCorrectedText(seg.getText());
-                    entity.setEmbedding(vectors.get(i));
-                    entity.setChapterTitle(title);
-                    entity.setStrategy(strategy);
-                    segmentMapper.insert(entity);
-                }
+                        VideoSegment entity = new VideoSegment();
+                        entity.setVideoId(videoId);
+                        entity.setTenantId(video.getTenantId());
+                        entity.setSegmentIndex(i);
+                        entity.setStartTime(seconds(seg.getStart()));
+                        entity.setEndTime(seconds(seg.getEnd()));
+                        entity.setTextContent(seg.getText());
+                        entity.setCorrectedText(seg.getText());
+                        entity.setEmbedding(vectors.get(i));
+                        entity.setChapterTitle(title);
+                        entity.setStrategy(strategy);
+                        segmentMapper.insert(entity);
+                    }
+                    return null;
+                });
 
                 // 6. 完成
                 video.setStatus(VideoStatus.DONE);
@@ -196,6 +212,7 @@ public class VideoProcessService {
                 videoMapper.updateById(video);
                 publish(videoId, ProcessStage.DONE, 100, "处理完成");
                 log.info("[{}] 处理完成，共 {} 个片段", videoId, topics.size());
+                metrics.task("success");
             }
         } catch (Exception e) {
             markFailed(videoId, video, e.getClass().getSimpleName(), e.getMessage(), e);
@@ -254,6 +271,7 @@ public class VideoProcessService {
         }
         markStatus(video, VideoStatus.FAILED, msg);
         publish(videoId, ProcessStage.FAILED, 100, "处理失败: " + msg);
+        metrics.task("failed");
     }
 
     private void publish(String videoId, String stage, int percent, String message) {

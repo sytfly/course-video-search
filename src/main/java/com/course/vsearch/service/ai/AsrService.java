@@ -2,6 +2,7 @@ package com.course.vsearch.service.ai;
 
 import com.course.vsearch.entity.AsrChunkCheckpoint;
 import com.course.vsearch.mapper.AsrChunkCheckpointMapper;
+import com.course.vsearch.observability.BusinessMetrics;
 import com.course.vsearch.service.audio.AudioPreprocessResult;
 import com.course.vsearch.service.ratelimit.ApiRateLimiter;
 import com.course.vsearch.service.retry.RetryExecutor;
@@ -46,17 +47,20 @@ public class AsrService {
     private final RetryExecutor retryExecutor;
     private final AsrChunkCheckpointMapper checkpointMapper;
     private final ThreadPoolTaskExecutor asrExecutor;
+    private final BusinessMetrics metrics;
 
     public AsrService(SiliconFlowClient client,
                       ApiRateLimiter rateLimiter,
                       RetryExecutor retryExecutor,
                       AsrChunkCheckpointMapper checkpointMapper,
-                      @Qualifier("asrExecutor") ThreadPoolTaskExecutor asrExecutor) {
+                      @Qualifier("asrExecutor") ThreadPoolTaskExecutor asrExecutor,
+                      BusinessMetrics metrics) {
         this.client = client;
         this.rateLimiter = rateLimiter;
         this.retryExecutor = retryExecutor;
         this.checkpointMapper = checkpointMapper;
         this.asrExecutor = asrExecutor;
+        this.metrics = metrics;
     }
 
     /**
@@ -154,6 +158,7 @@ public class AsrService {
                                 IntConsumer progress) {
         return () -> {
             boolean reused = false;
+            boolean failed = false;
             long began = System.currentTimeMillis();
             try {
                 AsrChunkCheckpoint cp = checkpoints.get(idx);
@@ -178,15 +183,19 @@ public class AsrService {
                     }
                 }
             } catch (Throwable t) {
+                failed = true;
                 run.failed.incrementAndGet();
                 log.warn("[ASR#{}] 块识别失败，已跳过 [{}s]: {}", idx, chunk.start(), t.getMessage());
             } finally {
-                // 复用块不产生 API 耗时，不纳入统计（否则均值会被大量 0 拉低）
+                long cost = System.currentTimeMillis() - began;
+                // 复用块不产生 API 耗时，不纳入均值（否则均值会被大量 0 拉低）
                 if (!reused) {
-                    long cost = System.currentTimeMillis() - began;
                     run.apiCostSum.addAndGet(cost);
                     run.apiCostMax.accumulateAndGet(cost, Math::max);
                 }
+                // 指标口径与上面的均值不同：连复用块一起记（用 result 区分），
+                // 这样既能看到真实调用块的长尾，也能看到断点复用率
+                metrics.asrChunk(cost, failed ? "failed" : reused ? "reused" : "ok");
                 int finished = run.done.incrementAndGet();
                 if (progress != null) {
                     progress.accept(finished * 100 / total);
