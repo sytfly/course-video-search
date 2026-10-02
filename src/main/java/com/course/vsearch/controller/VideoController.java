@@ -2,6 +2,7 @@ package com.course.vsearch.controller;
 
 import com.course.vsearch.common.Result;
 import com.course.vsearch.constant.ProcessStage;
+import com.course.vsearch.dto.BatchUploadResponse;
 import com.course.vsearch.dto.ChunkPartResponse;
 import com.course.vsearch.dto.ChunkUploadInitRequest;
 import com.course.vsearch.dto.ChunkUploadInitResponse;
@@ -82,11 +83,15 @@ public class VideoController {
         return Result.ok(chunkedUploadService.uploadPart(uploadId, fileIndex, partNumber, part));
     }
 
-    /** 6.1.3 分片上传-合并：校验分片齐全 → 按序合并并算内容指纹 → 走与单次上传相同的入库路径 */
+    /**
+     * 6.1.3 分片上传-合并：校验分片齐全 → 按序合并并算内容指纹 → 按真实流组成分组
+     * （纯画面轨 + 纯声音轨配成一对合并，其余各成一条视频）→ 每组走与单次上传相同的入库路径。
+     * 返回逐组结果，客户端按每组的 taskId 各自订阅处理进度。
+     */
     @PostMapping("/upload/complete")
-    public Result<UploadResponse> completeChunkedUpload(@RequestParam("uploadId") String uploadId,
-                                                        @RequestParam(value = "uploadTaskId", required = false)
-                                                        String uploadTaskId) {
+    public Result<BatchUploadResponse> completeChunkedUpload(@RequestParam("uploadId") String uploadId,
+                                                             @RequestParam(value = "uploadTaskId", required = false)
+                                                             String uploadTaskId) {
         return Result.ok(chunkedUploadService.complete(uploadId, uploadTaskId));
     }
 

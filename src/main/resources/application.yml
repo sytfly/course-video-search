@@ -93,6 +93,9 @@ vsearch:
     ffmpeg-path: ${FFMPEG_PATH:ffmpeg}
     ffprobe-path: ${FFPROBE_PATH:ffprobe}
     work-dir: ${VSEARCH_WORK_DIR:./data/ffmpeg}
+    # 双轨合并的时长容差：两轨时长偏差超过该比例即拒绝合并。
+    # 同一视频的画面轨与声音轨时长几乎相等，偏差过大说明两份文件本就不同源，硬拼只会得到音画错位的视频
+    mux-max-duration-drift: 0.1
     # ASR 目标音频码率（16k 单声道 mp3，40 分钟约 7MB，满足 50MB 限制）
     audio-bitrate: 24k
     # VAD：噪声门限 / 最短静音秒
@@ -114,6 +117,9 @@ vsearch:
     chunk-size: 5MB
     # 上传会话（Redis 分片位图 + 已落盘分片）保留时长：断点续传的有效窗口，超时后需重新上传
     session-ttl-hours: 24
+    # 一次批量上传最多可选多少个文件：服务端会自动把「纯画面轨 + 纯声音轨」配成一对合并，
+    # 其余各成一条视频。批次越大排队越久（处理流水线 2 路并发）
+    max-batch-files: 20
   # 话题分段
   segment:
     # fixed | semantic | acoustic

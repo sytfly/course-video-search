@@ -3,12 +3,14 @@ package com.course.vsearch.service;
 import com.course.vsearch.common.BizException;
 import com.course.vsearch.config.VSearchProperties;
 import com.course.vsearch.constant.ProcessStage;
+import com.course.vsearch.dto.BatchUploadResponse;
 import com.course.vsearch.dto.ChunkPartResponse;
 import com.course.vsearch.dto.ChunkUploadInitRequest;
 import com.course.vsearch.dto.ChunkUploadInitResponse;
 import com.course.vsearch.dto.ProgressEvent;
 import com.course.vsearch.dto.UploadResponse;
 import com.course.vsearch.security.TenantContext;
+import com.course.vsearch.service.audio.MediaSourceNormalizer;
 import com.course.vsearch.service.progress.ProgressService;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RBitSet;
@@ -20,6 +22,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.file.FileStore;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -27,6 +30,7 @@ import java.security.DigestOutputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
@@ -61,32 +65,41 @@ public class ChunkedUploadService {
     /** 分片大小边界：过小会把 300MB 切成上千个请求，过大则断点粒度太粗、单请求失败代价高 */
     private static final long MIN_CHUNK_SIZE = 256 * 1024L;
     private static final long MAX_CHUNK_SIZE = 64 * 1024 * 1024L;
-    /** 与单次上传一致：一个完整视频，或 B站 画面轨 + 声音轨 */
-    private static final int MAX_FILES = 2;
     /** 缺片提示里最多列几个分片号（避免报错信息过长） */
     private static final int MISSING_PREVIEW = 10;
+    /**
+     * 批次暂存目录名：分片先合并到这里，探测各文件真实流组成并分组后，
+     * 再把每组的文件 move 进各自的 upload/&lt;videoId&gt;/（同卷重命名，300MB 级文件不复制数据）。
+     */
+    private static final String MERGED_DIR = "merged";
+    /** 时长偏差比较的浮点容差 */
+    private static final double EPS = 1e-9;
 
     private final RedissonClient redisson;
     private final VSearchProperties props;
     private final ProgressService progressService;
     private final VideoAppService videoAppService;
+    private final MediaSourceNormalizer mediaNormalizer;
 
     public ChunkedUploadService(RedissonClient redisson,
                                 VSearchProperties props,
                                 ProgressService progressService,
-                                VideoAppService videoAppService) {
+                                VideoAppService videoAppService,
+                                MediaSourceNormalizer mediaNormalizer) {
         this.redisson = redisson;
         this.props = props;
         this.progressService = progressService;
         this.videoAppService = videoAppService;
+        this.mediaNormalizer = mediaNormalizer;
     }
 
     // ------------------------------------------------------------------ init
 
     public ChunkUploadInitResponse init(ChunkUploadInitRequest request) {
         List<ChunkUploadInitRequest.FileSpec> files = request == null ? null : request.files();
-        if (files == null || files.isEmpty() || files.size() > MAX_FILES) {
-            throw new BizException(400, "分片上传需要 1~2 个文件（完整视频，或 B站 画面轨 + 声音轨）");
+        int maxFiles = props.getUpload().getMaxBatchFiles();
+        if (files == null || files.isEmpty() || files.size() > maxFiles) {
+            throw new BizException(400, "分片上传需要 1~" + maxFiles + " 个文件（完整视频，或 B站 画面轨 + 声音轨）");
         }
         String sessionKey = request.sessionKey();
         if (sessionKey == null || !SESSION_KEY.matcher(sessionKey).matches()) {
@@ -192,10 +205,9 @@ public class ChunkedUploadService {
 
     // -------------------------------------------------------------- complete
 
-    public UploadResponse complete(String uploadId, String uploadTaskId) {
+    public BatchUploadResponse complete(String uploadId, String uploadTaskId) {
         RMap<String, String> meta = requireMeta(uploadId);
         int fileCount = Integer.parseInt(meta.get("fileCount"));
-        long chunkSize = Long.parseLong(meta.get("chunkSize"));
 
         // 先校验齐全再合并：半成品一旦走进流水线，失败会落在归一化阶段，排查成本高得多
         for (int i = 0; i < fileCount; i++) {
@@ -206,29 +218,240 @@ public class ChunkedUploadService {
                         + preview(missing) + "），续传缺失分片后再提交");
             }
         }
+        ensureDiskSpace(uploadId, meta, fileCount);
 
         String progressId = VideoAppService.validUploadTaskId(uploadTaskId);
         publish(progressId, "分片合并与内容校验中");
-        String videoId = "v_" + UUID.randomUUID().toString().replace("-", "");
-        Path uploadDir = Path.of(props.getFfmpeg().getWorkDir(), "upload", videoId);
+        Path stagingDir = sessionDir(uploadId).resolve(MERGED_DIR);
         List<VideoAppService.RawUpload> uploads = new ArrayList<>(fileCount);
         try {
-            Files.createDirectories(uploadDir);
+            Files.createDirectories(stagingDir);
             for (int i = 0; i < fileCount; i++) {
-                uploads.add(assemble(uploadId, i, meta, uploadDir));
+                uploads.add(assemble(uploadId, i, meta, stagingDir));
             }
         } catch (IOException e) {
-            VideoAppService.deleteRecursively(uploadDir);
+            VideoAppService.deleteRecursively(stagingDir);
             throw new BizException("合并上传分片失败: " + e.getMessage(), e);
         }
 
-        // 交给与单次上传相同的入库路径：MD5 去重、上传锁、后台预处理、投递流水线全在这里面。
-        // 失败时它自己清理 uploadDir，而分片保留在会话里，客户端补完即可重试 complete。
-        UploadResponse resp = videoAppService.submitSpooled(videoId,
-                uploads.get(0), uploads.size() > 1 ? uploads.get(1) : null, uploadDir, progressId);
+        publish(progressId, "识别画面轨与声音轨并分组");
+        List<BatchUploadResponse.Item> items = submitGroups(uploadId, uploads, progressId);
         discard(uploadId);
-        log.info("分片上传完成: {} -> {}（命中内容去重: {}）", uploadId, resp.taskId(), resp.duplicated());
-        return resp;
+        log.info("分片上传完成: {} -> {} 组（{} 个文件）", uploadId, items.size(), fileCount);
+        return new BatchUploadResponse(items);
+    }
+
+    // --------------------------------------------------------------- 分组与提交
+
+    /**
+     * 把 N 个已合并的文件按「真实流组成」分组并逐组入库。
+     * 规则：纯画面 + 纯声音且时长接近 → 配成一对（沿用现成的双轨合并）；音画俱全或配不上对的 → 各成一组。
+     * 单组失败只影响这一组，原因回给客户端，其余组照常提交。
+     */
+    private List<BatchUploadResponse.Item> submitGroups(String uploadId,
+                                                       List<VideoAppService.RawUpload> uploads,
+                                                       String progressId) {
+        List<Probe> probes = new ArrayList<>(uploads.size());
+        for (int i = 0; i < uploads.size(); i++) {
+            probes.add(probe(uploadId, i, uploads.get(i)));
+        }
+        int[] partner = pairTracks(probes);
+
+        List<BatchUploadResponse.Item> items = new ArrayList<>();
+        for (int i = 0; i < probes.size(); i++) {
+            Probe p = probes.get(i);
+            int j = partner[i];
+            if (j >= 0) {
+                // 配对组只在较小下标处提交一次，保证 items 顺序与文件顺序一致
+                if (i < j) {
+                    items.add(submitGroup(List.of(p, probes.get(j)), progressId));
+                }
+                continue;
+            }
+            if (p.error() != null) {
+                items.add(failedItem(List.of(p.name()), p.error()));
+                continue;
+            }
+            if (p.video() && !p.audio()) {
+                // 纯画面且没有可配的声音轨：不能放它单体进流水线——单文件路径不做音轨校验，
+                // 会先建记录、写对象存储，直到提取音频时才抛 ffmpeg 原始报错，用户无从判断原因
+                items.add(failedItem(List.of(p.name()),
+                        "这是纯画面文件，没有可用音轨，无法识别语音内容。请把它配套的声音轨一起选上"
+                                + "（B站 声音轨文件名通常形如 xxx-1-30280.m4s）；若只有无声录屏，请先录制带讲解声音的视频。"));
+                continue;
+            }
+            items.add(submitGroup(List.of(p), progressId));
+        }
+        return items;
+    }
+
+    /**
+     * 探测单个文件真实的流组成与时长。必须先归一化：B站 .m4s 头部带非标准字节，
+     * 裸文件 ffprobe 直接报 Invalid data。每份文件独占一个子目录——归一化中间产物按偏移量命名
+     * （如 resync-9.bin），两份文件共用目录会互相覆盖。探测副本留在会话目录里，随最后的 discard 回收。
+     */
+    private Probe probe(String uploadId, int index, VideoAppService.RawUpload upload) {
+        Path dir = sessionDir(uploadId).resolve("probe-" + index);
+        try {
+            Files.createDirectories(dir);
+            Path readable = mediaNormalizer.normalize(upload.file(), dir, false);
+            MediaSourceNormalizer.Streams s = mediaNormalizer.probeStreams(readable);
+            double duration = mediaNormalizer.durationSeconds(readable);
+            log.info("批量上传文件 {} 流组成: video={}, audio={}, 时长 {} 秒",
+                    upload.name(), s.video(), s.audio(), String.format("%.2f", duration));
+            return new Probe(upload, s.video(), s.audio(), duration, null);
+        } catch (Exception e) {
+            // 单份文件解析不了不该拖垮整批：把它单独标成失败组，其余组继续
+            log.warn("批量上传文件 {} 无法解析: {}", upload.name(), e.getMessage());
+            return new Probe(upload, false, false, 0,
+                    "文件无法解析为音视频（" + e.getMessage() + "），请确认文件完整且未损坏");
+        }
+    }
+
+    /**
+     * 贪心配对：按画面轨时长降序，各自挑一个「时长偏差在容差内且最接近」的声音轨，一个声音轨只配一次。
+     * 时长是主判据（实测 B站 的 video_track.m4s 与 src.m4s 没有公共词干，只能靠时长定），
+     * 文件名仅在偏差平手时用于裁决。容差沿用合并前一致性校验的同一个阈值，
+     * 保证「配对通过」的对一定不会在合并时又被拒。
+     */
+    private int[] pairTracks(List<Probe> probes) {
+        int[] partner = new int[probes.size()];
+        Arrays.fill(partner, -1);
+        List<Integer> videos = new ArrayList<>();
+        List<Integer> audios = new ArrayList<>();
+        for (int i = 0; i < probes.size(); i++) {
+            Probe p = probes.get(i);
+            if (p.error() != null || p.duration() <= 0) {
+                continue;
+            }
+            if (p.video() && !p.audio()) {
+                videos.add(i);
+            } else if (p.audio() && !p.video()) {
+                audios.add(i);
+            }
+        }
+        videos.sort((x, y) -> Double.compare(probes.get(y).duration(), probes.get(x).duration()));
+
+        double allowed = props.getFfmpeg().getMuxMaxDurationDrift();
+        boolean[] taken = new boolean[probes.size()];
+        for (int v : videos) {
+            int best = -1;
+            double bestDrift = Double.MAX_VALUE;
+            double bestStem = -1;
+            for (int a : audios) {
+                if (taken[a]) {
+                    continue;
+                }
+                double drift = drift(probes.get(v).duration(), probes.get(a).duration());
+                if (drift > allowed) {
+                    continue;
+                }
+                double stem = stemSimilarity(probes.get(v).name(), probes.get(a).name());
+                if (drift < bestDrift - EPS || (Math.abs(drift - bestDrift) <= EPS && stem > bestStem)) {
+                    best = a;
+                    bestDrift = drift;
+                    bestStem = stem;
+                }
+            }
+            if (best >= 0) {
+                taken[best] = true;
+                partner[v] = best;
+                partner[best] = v;
+                log.info("批量上传配对: 画面轨 {} / 声音轨 {}（时长偏差 {}%）",
+                        probes.get(v).name(), probes.get(best).name(),
+                        String.format("%.2f", bestDrift * 100));
+            }
+        }
+        return partner;
+    }
+
+    /**
+     * 把一组文件落成一条视频记录：自建 upload/&lt;videoId&gt;/ → 把文件 move 进去（同卷重命名，不复制数据）
+     * → 交给与单次上传完全相同的入库路径（去重、上传锁、后台预处理、投递流水线）。
+     * 注意传给 submitSpooled 的必须是原始合并文件：归一化/合并产物是后台预处理自己产出的，
+     * 且批次暂存目录稍后会被 discard 清掉。
+     */
+    private BatchUploadResponse.Item submitGroup(List<Probe> group, String progressId) {
+        List<String> names = group.stream().map(Probe::name).toList();
+        String videoId = "v_" + UUID.randomUUID().toString().replace("-", "");
+        Path uploadDir = Path.of(props.getFfmpeg().getWorkDir(), "upload", videoId);
+        try {
+            Files.createDirectories(uploadDir);
+            List<VideoAppService.RawUpload> moved = new ArrayList<>(group.size());
+            for (int i = 0; i < group.size(); i++) {
+                VideoAppService.RawUpload src = group.get(i).upload();
+                Path target = uploadDir.resolve("file-" + (i + 1));
+                Files.move(src.file(), target);
+                moved.add(new VideoAppService.RawUpload(src.name(), src.contentType(), target, src.md5()));
+            }
+            UploadResponse resp = videoAppService.submitSpooled(videoId, moved.get(0),
+                    moved.size() > 1 ? moved.get(1) : null, uploadDir, progressId);
+            return new BatchUploadResponse.Item(names, resp.taskId(), resp.status(), resp.duplicated(), null);
+        } catch (Exception e) {
+            // submitSpooled 在失败路径上自己会清 uploadDir，这里只是兜底
+            VideoAppService.deleteRecursively(uploadDir);
+            log.warn("批量上传分组提交失败 {}: {}", names, e.getMessage());
+            return new BatchUploadResponse.Item(names, null, "failed", false, e.getMessage());
+        }
+    }
+
+    private static BatchUploadResponse.Item failedItem(List<String> names, String error) {
+        return new BatchUploadResponse.Item(names, null, "failed", false, error);
+    }
+
+    /**
+     * 合并前粗查本地可用空间：批次是 N 个文件之和，合并副本又要占掉同等体积，
+     * 空间不够时先拒绝并保留会话——分片还在，客户端腾出空间后可直接重试 complete。
+     */
+    private void ensureDiskSpace(String uploadId, RMap<String, String> meta, int fileCount) {
+        long need = 0;
+        for (int i = 0; i < fileCount; i++) {
+            need += Long.parseLong(meta.get(key(i, "size")));
+        }
+        try {
+            long usable = Files.getFileStore(sessionDir(uploadId)).getUsableSpace();
+            if (usable < need) {
+                throw new BizException(507, "本地磁盘空间不足：本批共 " + (need / 1024 / 1024) + " MB，可用 "
+                        + (usable / 1024 / 1024) + " MB。已上传的分片仍保留，腾出空间后可直接重试提交。");
+            }
+        } catch (IOException e) {
+            // 查不到空间就不阻断：真写不下时 assemble 会抛 IOException，那条路径有明确的错误与清理
+            log.warn("查询磁盘可用空间失败，跳过空间预检: {}", e.getMessage());
+        }
+    }
+
+    /** 两份文件的时长相对偏差；任一时长探不到时返回最大值（即视为不可配对） */
+    private static double drift(double a, double b) {
+        double max = Math.max(a, b);
+        return max <= 0 ? Double.MAX_VALUE : Math.abs(a - b) / max;
+    }
+
+    /** 文件名相似度：去扩展名后的公共前缀占比，仅用于时长偏差平手时的裁决 */
+    private static double stemSimilarity(String a, String b) {
+        String x = stripExtension(a);
+        String y = stripExtension(b);
+        int limit = Math.min(x.length(), y.length());
+        int common = 0;
+        while (common < limit && x.charAt(common) == y.charAt(common)) {
+            common++;
+        }
+        int max = Math.max(x.length(), y.length());
+        return max == 0 ? 0 : (double) common / max;
+    }
+
+    private static String stripExtension(String name) {
+        int slash = Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'));
+        String base = slash >= 0 ? name.substring(slash + 1) : name;
+        int dot = base.lastIndexOf('.');
+        return (dot > 0 ? base.substring(0, dot) : base).toLowerCase(Locale.ROOT);
+    }
+
+    /** 单个文件的探测结果：error 非空表示这份文件解析不了，不参与配对 */
+    private record Probe(VideoAppService.RawUpload upload, boolean video, boolean audio,
+                         double duration, String error) {
+        String name() {
+            return upload.name();
+        }
     }
 
     /**
@@ -236,11 +459,11 @@ public class ChunkedUploadService {
      * 分片只读不删，故合并失败后会话依然可重试。
      */
     private VideoAppService.RawUpload assemble(String uploadId, int fileIndex,
-                                               RMap<String, String> meta, Path uploadDir) throws IOException {
+                                               RMap<String, String> meta, Path targetDir) throws IOException {
         String name = meta.get(key(fileIndex, "name"));
         String contentType = meta.get(key(fileIndex, "type"));
         int total = Integer.parseInt(meta.get(key(fileIndex, "total")));
-        Path target = uploadDir.resolve("file-" + (fileIndex + 1));
+        Path target = targetDir.resolve("file-" + (fileIndex + 1));
         MessageDigest md;
         try {
             md = MessageDigest.getInstance("MD5");

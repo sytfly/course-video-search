@@ -62,6 +62,12 @@ public class VSearchProperties {
         private String ffprobePath;
         private String workDir;
         private String audioBitrate;
+        /**
+         * 双轨合并前允许的两轨时长偏差比例（相对较长的轨），超过即拒绝合并。
+         * 同一视频的画面轨与声音轨时长几乎相等；偏差过大说明两份文件本就不同源
+         * （如画面取自 A、声音取自 B），合并只会产出「画面播 A、检索结果全是 B」的音画错位视频。
+         */
+        private double muxMaxDurationDrift = 0.1;
         private double vadNoiseDb = -35;
         private double vadMinSilence = 0.8;
         private int chunkMinSeconds = 8;
@@ -81,6 +87,11 @@ public class VSearchProperties {
         private DataSize chunkSize = DataSize.ofMegabytes(5);
         /** 上传会话（Redis 分片位图 + 已落盘分片）保留时长，超时后客户端只能重新上传 */
         private int sessionTtlHours = 24;
+        /**
+         * 一次批量上传最多可选多少个文件。多于此值直接拒绝：处理流水线只有 2 路并发，
+         * 而每个视频的预处理 + ASR 是分钟级，批次越大最后一条记录的等待越久。
+         */
+        private int maxBatchFiles = 20;
     }
 
     @Data

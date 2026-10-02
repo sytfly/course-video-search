@@ -131,9 +131,11 @@ public class MediaSourceNormalizer {
     /**
      * 把「画面轨 + 声音轨」（如 B站 DASH 的两个 .m4s）无损合并为单个 MP4：
      * -c copy 不重新编码，毫秒级完成；+faststart 把 moov 前置，浏览器可边下边播，
-     * 下游归一化也能直接命中「直接探测」路径。合并后按真实流组成复验，避免产出无声/无画结果。
+     * 下游归一化也能直接命中「直接探测」路径。合并前先比对两轨时长，偏差过大直接拒绝（两份文件不同源），
+     * 合并后再按真实流组成复验，避免产出无声/无画、或音画错位的结果。
      */
     public Path muxTracks(Path videoTrack, Path audioTrack, Path target) {
+        assertSameSource(videoTrack, audioTrack);
         ExecResult r = exec(List.of(
                 props.getFfmpeg().getFfmpegPath(),
                 "-y", "-v", "error",
@@ -157,6 +159,57 @@ public class MediaSourceNormalizer {
 
     /** 文件的流组成 */
     public record Streams(boolean video, boolean audio) {
+    }
+
+    /**
+     * 合并前比对两轨时长：同一视频的画面轨与声音轨几乎等长，偏差过大说明这两份文件本就不同源。
+     * 若不拦下，合并产物会是「画面来自 A、声音（以及全部 ASR 文本与检索结果）来自 B」的错位视频，
+     * 用户在检索结果与播放画面对不上时无从判断原因，故在合并前直接给出可操作的错误。
+     */
+    private void assertSameSource(Path videoTrack, Path audioTrack) {
+        double video = durationSeconds(videoTrack);
+        double audio = durationSeconds(audioTrack);
+        if (video <= 0 || audio <= 0) {
+            // 探不到时长（罕见容器）时不阻断合并，只留痕：合并后的流组成复验仍会兜底
+            log.warn("两轨时长探测失败（画面 {}s / 声音 {}s），跳过一致性校验", video, audio);
+            return;
+        }
+        double drift = Math.abs(video - audio) / Math.max(video, audio);
+        double allowed = props.getFfmpeg().getMuxMaxDurationDrift();
+        if (drift > allowed) {
+            throw new BizException(String.format(
+                    "两份文件时长相差 %.0f%%（画面 %.0f 秒 / 声音 %.0f 秒），超出 %.0f%% 的容差，"
+                            + "它们大概率不是同一个视频的画面轨与声音轨。请确认后重新上传配套的两轨文件；"
+                            + "若只需要其中一份，请单独上传该文件。",
+                    drift * 100, video, audio, allowed * 100));
+        }
+    }
+
+    /**
+     * ffprobe 读取容器时长（秒），取所有流的最大值；读不到返回 0。
+     * 供批量上传的分组逻辑复用：配对判据与合并前的一致性校验必须用同一个时长口径，
+     * 否则会出现「配对认为没问题、合并时却被拒绝」的矛盾。
+     */
+    public double durationSeconds(Path file) {
+        ExecResult r = exec(List.of(
+                props.getFfmpeg().getFfprobePath(),
+                "-v", "error",
+                "-probesize", "50M", "-analyzeduration", "50M",
+                "-show_entries", "format=duration:stream=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                file.toString()), Duration.ofMinutes(2));
+        if (r.exit() != 0) {
+            return 0;
+        }
+        double max = 0;
+        for (String line : r.output().split("\\R")) {
+            try {
+                max = Math.max(max, Double.parseDouble(line.trim()));
+            } catch (NumberFormatException ignored) {
+                // 非数值行（N/A、空行）跳过
+            }
+        }
+        return max;
     }
 
     /** 扫描前 1MB，返回命中容器魔数的「容器起始偏移」，按出现顺序，最多 MAX_CANDIDATES 个 */

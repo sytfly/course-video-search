@@ -191,10 +191,13 @@ function onUnauthorized() {
   applyRemembered()
 }
 
-async function onProcessed(videoId) {
-  // 新视频刚处理完，让视频库立刻能看到它（不必手动刷新）
+async function onProcessed(videoIds) {
+  // 新视频刚处理完，让视频库立刻能看到它（不必手动刷新）。批量时只刷一次，避免每组各刷一遍
   libraryRef.value?.reload()
-  await openVideo(videoId)
+  // 只处理出一个视频时才自动切播放器；批量完成不强行抢走用户当前的画面
+  if (Array.isArray(videoIds) && videoIds.length === 1) {
+    await openVideo(videoIds[0])
+  }
 }
 
 /** 视频库里点选某个视频：限定搜索范围并载入播放器；选空串表示切回全库，播放器保持现状 */

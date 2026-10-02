@@ -133,7 +133,11 @@ export function uploadChunkPart(uploadId, fileIndex, partNumber, blob) {
   return post(`/upload/part?${qs}`, {form}, PART_TIMEOUT_MS)
 }
 
-/** 合并分片：服务端校验分片齐全 → 按序合并 + 算内容指纹 → 走与单次上传相同的入库路径 */
+/**
+ * 合并分片：服务端校验分片齐全 → 按序合并 + 算内容指纹 → 按真实流组成分组
+ * （纯画面轨 + 纯声音轨自动配成一对合并，其余各成一条视频）→ 逐组入库。
+ * 返回 {items:[{fileNames, taskId, status, duplicated, error}]}：客户端按每组的 taskId 各自订阅处理进度。
+ */
 export function completeChunkUpload(uploadId, uploadTaskId) {
   const qs = new URLSearchParams({uploadId})
   if (uploadTaskId) qs.set('uploadTaskId', uploadTaskId)
@@ -177,8 +181,11 @@ async function withRetry(fn, attempts = PART_RETRIES) {
 
 /**
  * 上传视频：File.slice 切片 → 并行上传 → 服务端合并入流水线。
- * files 可为单个 File 或 [主文件, 声音轨]（B站 .m4s 双轨场景，顺序无关）。
+ * files 为 File 数组：可一次多选任意数量，服务端按真实流组成自动分组
+ * （纯画面轨 + 纯声音轨配成一对合并，其余各成一条独立视频）。
  * uploadTaskId 为客户端自带的上传期进度 ID（up_xxx），服务端把「合并 / 归一化 / 写对象存储」的进度推给它。
+ *
+ * 返回值：{items:[{fileNames, taskId, status, duplicated, error}]}，逐组一个 taskId。
  *
  * onProgress(pct, info)：pct 由「服务端已确认收下的分片字节数」算出（不是本地上传缓冲区的估算），
  * info = {resumed, skippedParts, totalParts}，用于提示本次是否为断点续传、复用了多少片。

@@ -496,8 +496,16 @@ public class VideoAppService {
     /**
      * 状态非 FAILED、非 DONE 时判孤儿：处理锁空闲说明没有实例真的在处理它。
      * 处理锁走 Redisson 看门狗，进程被强杀后 30 秒内自动释放，故锁空闲即持有者已消失。
+     * <p>
+     * 「锁空闲」还有一个正常来源：任务已投进流水线但还没被线程池取走（2 线程，排队可以很久），
+     * 排队中的任务本来就不持锁。故先查 InFlightTaskRegistry（本进程已接手的登记表）把它排除，
+     * 否则排队窗口内重传同一文件会被误判成孤儿而重投，delete 也会误放行。
+     * 与 {@link #isInterrupted} 用同一个判据。
      */
     private boolean isOrphan(String videoId) {
+        if (inFlightRegistry.contains(videoId)) {
+            return false;
+        }
         try {
             return !lockService.isLocked(VideoProcessService.processLockKey(videoId));
         } catch (Exception e) {
