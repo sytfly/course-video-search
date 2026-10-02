@@ -3,6 +3,7 @@ target/
 .idea/
 *.iml
 .vscode/
+.trae/
 .settings/
 .project
 .classpath
@@ -19,6 +20,3 @@ frontend/dist/
 # 本地密钥配置
 application-local.yml
 .env
-
-# IDE / 智能体内部工作区：内部实施计划、标注底稿（含第三方课程逐字稿），一律不发布
-.trae/
